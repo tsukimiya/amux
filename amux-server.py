@@ -9163,6 +9163,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   /* Peek search highlight */
   .peek-highlight { background: rgba(210,153,34,0.35); color: #fff; border-radius: 2px; }
   .peek-highlight.current { background: rgba(210,153,34,0.85); color: #000; }
+  .peek-prompt { display: block; border-left: 3px solid rgba(210,180,60,0.5); padding-left: 8px; margin-left: -11px; background: rgba(210,180,60,0.07); border-radius: 0 3px 3px 0; }
 
   /* Peek overlay — flush to bottom, cmd bar handles its own safe-area padding */
   #peek-overlay { padding-bottom: 0 !important; bottom: 0 !important; }
@@ -11394,6 +11395,16 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 </style>
 </head>
 <body>
+<div id="js-fallback" style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:16px;z-index:99999;background:var(--bg,#0d1117);color:#8b949e;font-family:-apple-system,system-ui,sans-serif;">
+  <div style="font-size:1.1rem;">Loading amux...</div>
+  <div id="js-fallback-retry" style="display:none;text-align:center;">
+    <div style="margin-bottom:12px;color:#f87171;">Failed to load. Try reloading.</div>
+    <button onclick="location.reload()" style="padding:10px 24px;border-radius:8px;border:1px solid #30363d;background:#21262d;color:#e6edf3;font-size:0.9rem;cursor:pointer;">Reload</button>
+  </div>
+</div>
+<script>
+setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style.display!=='none'){document.getElementById('js-fallback-retry').style.display='';}},8000);
+</script>
 <div id="no-apikey-banner" style="display:none;background:#7c2d12;color:#fed7aa;padding:8px 16px;text-align:center;font-size:0.82rem;z-index:200;position:relative;">
   No Anthropic API key set — Claude sessions won't work. <a href="#" onclick="event.preventDefault();document.getElementById('no-apikey-banner').style.display='none';toggleSettings()" style="color:#fde68a;font-weight:600;text-decoration:underline;">Add key in Settings</a>
 </div>
@@ -16897,7 +16908,7 @@ function openPeek(name, opts) {
   _idb.get('peek_' + name).then(cached => {
     if (peekSession !== name) return;  // session changed before cache resolved
     if (cached && (!lastPeekHTML || lastPeekHTML.includes('Loading...'))) {
-      lastPeekHTML = linkifyOutput(stripAnsi(cached.output));
+      lastPeekHTML = highlightPrompts(linkifyOutput(stripAnsi(cached.output)));
       applyPeekSearch();
       const ago = Math.floor((Date.now() - cached.time) / 60000);
       document.getElementById('peek-status').textContent = 'Cached ' + (ago < 1 ? 'just now' : ago + 'm ago');
@@ -17235,6 +17246,31 @@ function linkifyOutput(text) {
   return rewriteLocalhostUrls(html);
 }
 
+function highlightPrompts(html) {
+  const lines = html.split('\n');
+  let inPrompt = false;
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    const isPromptStart = raw.startsWith('❯');
+    const isContinuation = inPrompt && /^  \S/.test(raw);
+    if (isPromptStart) {
+      inPrompt = true;
+      out.push('<span class="peek-prompt">' + raw);
+    } else if (isContinuation) {
+      out.push(raw);
+    } else {
+      if (inPrompt) {
+        out[out.length - 1] += '</span>';
+        inPrompt = false;
+      }
+      out.push(raw);
+    }
+  }
+  if (inPrompt) out[out.length - 1] += '</span>';
+  return out.join('\n');
+}
+
 let peekSelecting = false;
 let _peekScrollLocked = false;
 
@@ -17274,7 +17310,7 @@ async function refreshPeek() {
     const output = data.output || '(no output)';
     const atBottom = _isScrolledToBottom(body);
     if (atBottom) _peekScrollLocked = false;
-    const newHTML = linkifyOutput(stripAnsi(output));
+    const newHTML = highlightPrompts(linkifyOutput(stripAnsi(output)));
     if (peekSelecting || (window.getSelection()?.toString().length > 0)) return;
     if (_sendingSnapshot && newHTML !== _sendingSnapshot) clearSendingIndicator();
     lastPeekHTML = newHTML;
@@ -17299,7 +17335,7 @@ async function refreshPeek() {
     if (!lastPeekHTML || lastPeekHTML.includes('Loading...')) {
       const cached = await _idb.get('peek_' + peekSession);
       if (cached) {
-        lastPeekHTML = linkifyOutput(stripAnsi(cached.output));
+        lastPeekHTML = highlightPrompts(linkifyOutput(stripAnsi(cached.output)));
         applyPeekSearch();
         const ago = Math.floor((Date.now() - cached.time) / 60000);
         statusEl.textContent = 'Cached ' + (ago < 1 ? 'just now' : ago + 'm ago');
@@ -24505,7 +24541,7 @@ async function _updateGridPane(name) {
     const data = await fetch(API + '/api/sessions/' + encodeURIComponent(name) + '/peek?lines=500').then(r => r.json());
     const atBottom = _isScrolledToBottom(body);
     const locked = body._scrollLocked;
-    body.innerHTML = linkifyOutput(stripAnsi(data.output || ''));
+    body.innerHTML = highlightPrompts(linkifyOutput(stripAnsi(data.output || '')));
     if (!locked && atBottom) {
       body.scrollTop = body.scrollHeight;
       _hideScrollLockBadge(body);
@@ -25334,6 +25370,8 @@ setInterval(() => {
 connectSSE();
 _notifUpdateBadge();
 loadBranding();
+// JS initialized — hide the no-JS fallback overlay
+(function(){var f=document.getElementById('js-fallback');if(f)f.style.display='none';})();
 
 // Initialize chrome tabs
 _chromeRender();
@@ -30826,7 +30864,7 @@ PWA_MANIFEST = json.dumps({
 
 # Robust service worker: cache-first with localStorage fallback for multi-day offline
 SERVICE_WORKER = r"""
-const CACHE = 'amux-v0.6.6';
+const CACHE = 'amux-v0.6.7';
 const SHELL_URLS = ['/', '/manifest.json', '/icon.svg', '/icon.png', '/icon-192.png', '/icon-512.png'];
 
 // Install: pre-cache entire app shell
