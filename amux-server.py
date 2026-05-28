@@ -7293,7 +7293,7 @@ def _email_sync() -> None:
         lookback_seconds = 7 * 86400  # first run: 7 days
     else:
         elapsed = now_ts - last_ts
-        lookback_seconds = elapsed + 300  # add 5 min buffer to avoid gaps
+        lookback_seconds = min(elapsed + 300, 2 * 86400)  # cap at 2 days to avoid timeout spiral
     slog(f"[email] syncing lookback={lookback_seconds//60}min")
     messages = _mail_fetch_messages(lookback_seconds)
     if messages is None:
