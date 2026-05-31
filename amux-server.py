@@ -14022,6 +14022,8 @@ async function showSessionInfo(name) {
   const m = await r.json();
   const ts = t => t ? new Date(t * 1000).toLocaleString() : '—';
   const row = (label, val) => val ? `<div style="display:flex;gap:8px;padding:5px 0;border-bottom:1px solid var(--border);font-size:0.85rem;"><span style="color:var(--dim);min-width:110px;flex-shrink:0;">${label}</span><span style="word-break:break-all;">${val}</span></div>` : '';
+  const provider = sessionProvider(m);
+  const configuredModel = m.configured_model || flagValue(m.flags || '', '--model') || providerDefaultModel(provider);
   const html = `<div style="text-align:left;">
     <div style="font-size:1.05rem;font-weight:700;margin-bottom:12px;">${esc(name)}</div>
     ${row('Created', ts(m.created_at))}
@@ -14030,7 +14032,9 @@ async function showSessionInfo(name) {
     ${row('Start count', m.start_count !== undefined ? m.start_count : '—')}
     ${row('Env updated', ts(m.env_updated))}
     ${row('Directory', m.dir)}
-    ${row('Model / flags', m.flags || '(default sonnet)')}
+    ${row('Provider', providerLabel(provider))}
+    ${row('Model', configuredModel)}
+    ${row('Flags', m.flags || '(default)')}
     ${m.desc ? row('Description', m.desc) : ''}
     ${m.tags && m.tags.length ? row('Tags', m.tags.join(', ')) : ''}
     ${row('Memory size', m.mem_size ? m.mem_size + ' bytes' : '(empty)')}
@@ -14577,17 +14581,50 @@ function updatePeekStatus() {
   // Model badge
   const mb = document.getElementById('peek-model-badge');
   if (mb) {
-    const flagModel = (s.flags || '').match(/--model\s+(\S+)/);
-    const defaultModel = s.provider === 'codex' ? 'gpt-5.5' : (s.provider === 'gemini' ? 'auto' : 'sonnet');
-    const model = s.active_model || (flagModel ? flagModel[1] : '') || defaultModel;
-    mb.textContent = model;
+    mb.textContent = sessionConfiguredModel(s);
   }
+}
+
+function shellWords(s) {
+  const out = [];
+  const re = /"((?:\\.|[^"\\])*)"|'([^']*)'|(\S+)/g;
+  let m;
+  while ((m = re.exec(s || '')) !== null) {
+    out.push((m[1] || m[2] || m[3] || '').replace(/\\(["\\])/g, '$1'));
+  }
+  return out;
+}
+
+function flagValue(flags, flag) {
+  const tokens = shellWords(flags || '');
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (t === flag && i + 1 < tokens.length) return tokens[i + 1];
+    if (t.startsWith(flag + '=')) return t.slice(flag.length + 1);
+  }
+  return '';
 }
 
 function providerLabel(provider) {
   if (provider === 'codex') return 'Codex';
   if (provider === 'gemini') return 'Gemini';
   return 'Claude';
+}
+
+function sessionProvider(s) {
+  const p = ((s && s.provider) || 'claude').toLowerCase();
+  return (p === 'codex' || p === 'gemini') ? p : 'claude';
+}
+
+function providerDefaultModel(provider) {
+  if (provider === 'codex') return 'gpt-5.5';
+  if (provider === 'gemini') return 'auto';
+  return window._AMUX_DEFAULT_MODEL || 'sonnet';
+}
+
+function sessionConfiguredModel(s) {
+  const provider = sessionProvider(s);
+  return flagValue((s && s.flags) || '', '--model') || (s && s.active_model) || providerDefaultModel(provider);
 }
 
 function providerYoloFlag(provider) {
@@ -14691,12 +14728,8 @@ function render() {
     const isExp = expanded.has(s.name);
     const flags = s.flags || '';
     const isYolo = flags.includes('--dangerously-skip-permissions') || flags.includes('--dangerously-bypass-approvals-and-sandbox') || flags.includes('--yolo') || !!s.auto_continue;
-    const modelMatch = flags.match(/--model\s+(\S+)/);
-    const flagModel = modelMatch ? modelMatch[1] : null;
-    const model = flagModel || s.active_model || null;
-    const shortModel = model ? model.replace(/^claude-/, '').replace(/-\d{8}$/, '') : null;
-    let provider = (s.provider || 'claude').toLowerCase();
-    if (provider !== 'claude' && provider !== 'codex' && provider !== 'gemini') provider = 'claude';
+    const provider = sessionProvider(s);
+    const model = sessionConfiguredModel(s);
     const pLabel = providerLabel(provider);
     return `
     <div class="card ${isExp ? 'expanded' : ''}" data-session="${esc(s.name)}" onclick="event.stopPropagation();toggle('${s.name}')">
@@ -14757,7 +14790,7 @@ function render() {
       ${(isYolo || model || s.tags.length || provider) ? `<div class="badges">
         <span class="badge provider ${provider}" onclick="event.stopPropagation();editField('${s.name}','provider','${esc(provider)}')" title="Change provider">${pLabel}</span>
         ${isYolo ? '<span class="badge yolo">YOLO</span>' : ''}
-        ${model ? `<span class="badge model">${esc(model)}</span>` : ''}
+        ${model ? `<span class="badge model" onclick="event.stopPropagation();editField('${s.name}','model','${esc(model)}','${esc(provider)}')" title="Change model">${esc(model)}</span>` : ''}
         ${s.tags.map(t => `<span class="tag" data-tag="${esc(t)}" onclick="event.stopPropagation();toggleTagFilter('${esc(t)}')">${esc(t)}</span>`).join('')}
       </div>` : ''}
       ${!s.running ? `<div style="padding:6px 0 2px;" onclick="event.stopPropagation()">
@@ -36230,6 +36263,10 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 meta = _load_meta(name)
                 # Merge static env fields for a complete picture
                 meta.setdefault("creator", cfg.get("CC_CREATOR", ""))
+                provider = cfg.get("CC_PROVIDER", "claude").strip().lower() or "claude"
+                if provider not in _SESSION_PROVIDERS:
+                    provider = "claude"
+                flags = cfg.get("CC_FLAGS", "")
                 env_mtime = int(env_file.stat().st_mtime)
                 mem_file = _session_mem_file(name)
                 mem_size = mem_file.stat().st_size if mem_file.exists() else 0
@@ -36237,7 +36274,9 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     **meta,
                     "name": name,
                     "dir": cfg.get("CC_DIR", ""),
-                    "flags": cfg.get("CC_FLAGS", ""),
+                    "provider": provider,
+                    "flags": flags,
+                    "configured_model": _extract_model_from_flags(flags) or _default_model_for_provider(provider),
                     "desc": cfg.get("CC_DESC", ""),
                     "tags": [t.strip() for t in cfg.get("CC_TAGS", "").split(",") if t.strip()],
                     "env_updated": env_mtime,
