@@ -6731,6 +6731,16 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                                capture_output=True, timeout=5)
                 _poll_shell_prompt(name, timeout=3.0)  # let profile source complete
     
+            # Ensure ANTHROPIC_API_KEY is unset when OAuth is available
+            if _has_oauth and provider not in ("codex", "gemini"):
+                subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "-l",
+                                "unset ANTHROPIC_API_KEY"],
+                               capture_output=True, timeout=5)
+                time.sleep(0.1)
+                subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
+                               capture_output=True, timeout=5)
+                _poll_shell_prompt(name, timeout=3.0)
+
             # Send the Claude command
             subprocess.run(["tmux", "send-keys", "-t", tmux_target(name), "-l", cmd],
                            capture_output=True, timeout=5)
@@ -10986,6 +10996,44 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   .notes-pin-btn:hover { background: rgba(139,148,158,0.12); color: var(--text); }
   .notes-pin-btn.pinned { color: var(--accent); }
+  /* Pinned notes on home screen */
+  .pinned-notes-home { padding: 0 12px; display: flex; flex-direction: column; gap: 8px; }
+  .pinned-notes-home:empty { display: none; }
+  .pinned-note-card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 14px; cursor: pointer; position: relative;
+    transition: border-color 0.15s;
+  }
+  .pinned-note-card:hover { border-color: var(--accent); }
+  .pinned-note-header {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
+  }
+  .pinned-note-header svg { color: var(--accent); flex-shrink: 0; }
+  .pinned-note-title {
+    font-weight: 600; font-size: 0.85rem; color: var(--text); flex: 1; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .pinned-note-unpin {
+    background: none; border: none; color: var(--dim); cursor: pointer; padding: 4px;
+    border-radius: 4px; display: flex; align-items: center; opacity: 0; transition: opacity 0.15s;
+  }
+  .pinned-note-card:hover .pinned-note-unpin { opacity: 1; }
+  .pinned-note-unpin:hover { color: var(--text); background: rgba(139,148,158,0.12); }
+  .pinned-note-body {
+    font-size: 0.8rem; color: var(--dim); max-height: 120px; overflow: hidden;
+    line-height: 1.5; position: relative;
+  }
+  .pinned-note-body.md-content h1, .pinned-note-body.md-content h2, .pinned-note-body.md-content h3 { display: none; }
+  .pinned-note-body.md-content ul, .pinned-note-body.md-content ol { padding-left: 18px; margin: 2px 0; }
+  .pinned-note-body.md-content p { margin: 2px 0; }
+  .pinned-note-body::after {
+    content: ''; position: absolute; bottom: 0; left: 0; right: 0; height: 30px;
+    background: linear-gradient(transparent, var(--card));
+  }
+  @media (max-width: 600px) {
+    .pinned-notes-home { padding: 0 8px; }
+    .pinned-note-body { max-height: 80px; }
+  }
   .notes-empty-state {
     position: absolute; inset: 0; display: flex; flex-direction: column;
     align-items: center; justify-content: center;
@@ -11994,6 +12042,7 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
   </div>
   <div id="offline-ops" class="offline-queue-ops"></div>
 </div>
+<div id="pinned-notes-home" class="pinned-notes-home"></div>
 <div id="cards" class="cards"></div>
 <div id="archived-section"></div>
 </div>
@@ -25683,6 +25732,7 @@ function connectSSE() {
           if (key === 'notes') {
             if (activeView === 'notes') _notesLoad();
             else _notesDirty = true;
+            _pinnedNotesRefresh();
           } else if (key === 'crm') {
             if (activeView === 'crm') _crmLoad();
             else _crmDirty = true;
@@ -29231,6 +29281,55 @@ async function _notesTogglePin(path) {
   _notesAllNotes.sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || b.updated - a.updated);
   _notesRenderList(_notesAllNotes);
   _notesUpdatePinBtn();
+  _pinnedNotesRefresh();
+}
+
+// ── Pinned notes on home screen ──────────────────────────────────────────────
+let _pinnedNotesCache = [];
+async function _pinnedNotesRefresh() {
+  const container = document.getElementById('pinned-notes-home');
+  if (!container) return;
+  try {
+    const r = await fetch(API + '/api/notes');
+    const all = await r.json();
+    const pinned = all.filter(n => n.pinned);
+    if (!pinned.length) { container.innerHTML = ''; _pinnedNotesCache = []; return; }
+    const contents = await Promise.all(pinned.map(async n => {
+      try {
+        const cr = await fetch(API + '/api/notes/' + n.path.replace(/\.md$/, '').split('/').map(encodeURIComponent).join('/'));
+        const d = await cr.json();
+        return { ...n, content: d.content || '' };
+      } catch { return { ...n, content: '' }; }
+    }));
+    _pinnedNotesCache = contents;
+    _pinnedNotesRender();
+  } catch(e) { console.error('pinned notes:', e); }
+}
+function _pinnedNotesRender() {
+  const container = document.getElementById('pinned-notes-home');
+  if (!container) return;
+  if (!_pinnedNotesCache.length) { container.innerHTML = ''; return; }
+  container.innerHTML = _pinnedNotesCache.map(n => {
+    const isHtml = /<[a-z][\s\S]*>/i.test(n.content);
+    const body = isHtml ? n.content : renderMarkdown(n.content);
+    return `<div class="pinned-note-card" onclick="_pinnedNoteOpen('${esc(n.path)}')" data-path="${esc(n.path)}">
+      <div class="pinned-note-header">
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"/></svg>
+        <span class="pinned-note-title">${esc(n.name)}</span>
+        <button class="pinned-note-unpin" onclick="event.stopPropagation();_pinnedNoteUnpin('${esc(n.path)}')" title="Unpin from home">
+          <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="pinned-note-body md-content">${body}</div>
+    </div>`;
+  }).join('');
+}
+function _pinnedNoteOpen(path) {
+  switchView('notes');
+  setTimeout(() => _notesOpen(path), 100);
+}
+async function _pinnedNoteUnpin(path) {
+  await _notesTogglePin(path);
 }
 
 // ── CRM / People ──────────────────────────────────────────────────────────────
@@ -31156,6 +31255,7 @@ async function _jrnlSaveConfig() {
   document.getElementById('jrnl-config-overlay')?.remove();
   _jrnlRenderEditor();
 }
+window.addEventListener('load', _pinnedNotesRefresh);
 </script>
 
 <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
