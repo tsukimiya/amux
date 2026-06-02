@@ -10890,6 +10890,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     padding: 10px 12px 6px; flex-shrink: 0;
   }
   .notes-sidebar-actions { display: flex; gap: 4px; align-items: center; }
+  .notes-source-indicator {
+    flex-shrink: 0; display: flex; align-items: center; gap: 6px;
+    padding: 7px 12px; border-top: 1px solid rgba(139,148,158,0.12);
+    font-size: 0.7rem; color: var(--dim); cursor: pointer;
+    overflow: hidden; white-space: nowrap;
+  }
+  .notes-source-indicator:hover { background: rgba(139,148,158,0.1); color: var(--text); }
+  .notes-source-indicator svg { flex-shrink: 0; opacity: 0.7; }
+  .notes-source-indicator #notes-source-name { overflow: hidden; text-overflow: ellipsis; }
   .notes-toggle-btn {
     background: transparent; border: none; color: var(--dim); cursor: pointer;
     padding: 4px; border-radius: 4px; display: flex; align-items: center; justify-content: center;
@@ -11948,6 +11957,14 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
           <div id="settings-apikey-status" style="font-size:0.7rem;color:var(--dim);margin-top:4px;"></div>
         </div>
         <div class="settings-sep"></div>
+        <div class="settings-section" id="settings-notes-section">
+          <div class="settings-section-label">Notes folder</div>
+          <div style="font-size:0.72rem;color:var(--dim);margin-bottom:6px;">Notes sync (read + write) with this folder — e.g. your Obsidian vault</div>
+          <div id="settings-notes-dir" style="font-family:monospace;font-size:0.74rem;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 8px;word-break:break-all;color:var(--text);">…</div>
+          <div id="settings-notes-status" style="font-size:0.7rem;color:var(--dim);margin-top:4px;"></div>
+          <div style="font-size:0.66rem;color:var(--dim);margin-top:4px;">Change via <code>AMUX_NOTES_DIR</code> in <code>~/.amux/server.env</code></div>
+        </div>
+        <div class="settings-sep"></div>
         <div class="settings-section" id="settings-billing-section" style="display:none;">
           <div class="settings-section-label">Plan &amp; Billing</div>
           <div id="settings-billing-info" style="font-size:0.78rem;color:var(--dim);">Loading…</div>
@@ -12267,6 +12284,10 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
         <span id="notes-trash-count" style="margin-left:auto;font-size:0.7rem;"></span>
       </div>
       <div class="notes-trash-body" id="notes-trash-body" style="display:none;"></div>
+    </div>
+    <div class="notes-source-indicator" id="notes-source-indicator" onclick="toggleSettings()" title="Notes sync folder — click to open Settings">
+      <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
+      <span id="notes-source-name">…</span>
     </div>
   </div>
   <!-- Editor pane -->
@@ -22332,6 +22353,7 @@ function switchView(view) {
     _notesDirty = false;
     _notesLoad(); // always refresh list on tab switch
     _notesReloadActive(); // refresh open note content if it changed on disk (Obsidian)
+    _notesLoadSource(); // show which folder notes are syncing with
   }
   if (view === 'logs') { fetchLogs(); _startLogsTimer(); } else { _stopLogsTimer(); }
   if (view === 'board') {
@@ -26313,6 +26335,8 @@ function toggleSettings() {
     }
     // Render connections
     _renderInstanceSwitcher();
+    // Populate the notes-folder row
+    _notesLoadSource();
   }
 }
 
@@ -28522,6 +28546,27 @@ function _notesInitQuill() {
       _notesSaveDebounce();
     }
   });
+}
+
+let _notesSourceInfo = null;
+async function _notesLoadSource() {
+  try {
+    const r = await fetch(API + '/api/notes-source');
+    const s = await r.json();
+    _notesSourceInfo = s;
+    const nameEl = document.getElementById('notes-source-name');
+    const ind = document.getElementById('notes-source-indicator');
+    if (nameEl) nameEl.textContent = s.name || s.dir;
+    if (ind) {
+      ind.title = (s.exists ? 'Notes sync folder: ' : 'Folder NOT found: ') + s.dir + ' — click to open Settings';
+      ind.style.color = s.exists ? '' : 'var(--danger, #f85149)';
+    }
+    // Mirror into Settings → Notes section if present
+    const setEl = document.getElementById('settings-notes-dir');
+    if (setEl) setEl.textContent = s.dir;
+    const setStatus = document.getElementById('settings-notes-status');
+    if (setStatus) setStatus.textContent = s.exists ? (s.custom ? 'Custom folder (AMUX_NOTES_DIR)' : 'Default folder') : 'Folder not found';
+  } catch(e) {}
 }
 
 async function _notesLoad() {
@@ -32434,6 +32479,19 @@ class CCHandler(BaseHTTPRequestHandler):
                                   "updated": int(stat.st_mtime), "pinned": rel in pins})
             notes.sort(key=lambda n: (0 if n["pinned"] else 1, -n["updated"]))
             return self._json(notes)
+
+        if method == "GET" and path == "/api/notes-source":
+            # Where notes are read/written from — drives the notes-tab source
+            # indicator. Set via AMUX_NOTES_DIR in ~/.amux/server.env.
+            d = str(CC_NOTES)
+            custom = bool(os.environ.get("AMUX_NOTES_DIR"))
+            return self._json({
+                "dir": d,
+                "name": CC_NOTES.name or d,
+                "exists": CC_NOTES.is_dir(),
+                "custom": custom,
+                "env_var": "AMUX_NOTES_DIR",
+            })
 
         if method == "GET" and path == "/api/notes/trash":
             trash_dir = CC_NOTES_TRASH
