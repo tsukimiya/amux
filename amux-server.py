@@ -487,6 +487,60 @@ def _bu_screenshot(session: str = "amux", path: str = "", retries: int = 3) -> d
         return result
     return result
 
+def _resolve_claude_bin() -> str:
+    """Locate the claude CLI binary (PATH first, then common install locations)."""
+    found = shutil.which("claude")
+    if found:
+        return found
+    for p in (Path.home() / ".local" / "bin" / "claude",
+              Path.home() / ".claude" / "local" / "claude",
+              Path("/usr/local/bin/claude"),
+              Path("/opt/homebrew/bin/claude")):
+        if p.exists():
+            return str(p)
+    return ""
+
+
+def _on_claude_plan() -> bool:
+    """True when logged in via OAuth (a Claude Plan), independent of any API key."""
+    try:
+        cj = Path.home() / ".claude.json"
+        if cj.exists():
+            return bool(json.loads(cj.read_text()).get("oauthAccount"))
+    except Exception:
+        pass
+    return False
+
+
+def _claude_oneshot(prompt: str, model: str = "haiku", timeout: int = 35) -> tuple:
+    """Run a one-shot headless `claude -p` query using the active Claude Code
+    session's auth — Plan OAuth or API key, whichever the CLI is configured with.
+
+    Returns (text, error). Mirrors amux's session launch: when on a Plan, the
+    ANTHROPIC_API_KEY is unset so the subscription is used rather than a key.
+    """
+    claude_bin = _resolve_claude_bin()
+    if not claude_bin:
+        return ("", "claude CLI not found")
+    env = dict(os.environ)
+    env.pop("CLAUDECODE", None)
+    env.pop("CLAUDE_CODE_ENTRYPOINT", None)
+    if _on_claude_plan():
+        env.pop("ANTHROPIC_API_KEY", None)
+    try:
+        r = subprocess.run(
+            [claude_bin, "-p", prompt, "--model", model],
+            capture_output=True, text=True, timeout=timeout,
+            cwd=str(CC_HOME), env=env)
+        if r.returncode != 0:
+            return ("", (r.stderr or r.stdout or "claude exited non-zero").strip()[:500])
+        return (r.stdout.strip(), "")
+    except subprocess.TimeoutExpired:
+        return ("", "lookup timed out")
+    except Exception as e:
+        return ("", str(e))
+
+
 def _bu_agent_run(task: str, session: str = "amux-agent", profile: str = "default",
                   start_url: str = "", max_iterations: int = 25,
                   model: str = "claude-sonnet-4-5") -> dict:
@@ -34081,23 +34135,29 @@ class CCHandler(BaseHTTPRequestHandler):
                 return self._json({"error": "missing text"}, 400)
             if len(text) > 2000:
                 text = text[:2000]
+            prompt = (f"Briefly explain what this means or refers to in 2-4 sentences. "
+                      f"Be concise and direct. If it's a technical term, code, error, "
+                      f"or concept, explain it. If it's a name, identify it.\n\n{text}")
+            # Use the same auth as the active Claude Code session: when on a Plan
+            # (OAuth) use the claude CLI; otherwise use the API key via the SDK.
             api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-            if not api_key:
-                return self._json({"error": "no API key configured"}, 400)
-            try:
-                import anthropic as _anthropic
-                client = _anthropic.Anthropic(api_key=api_key)
-                msg = client.messages.create(
-                    model="claude-haiku-4-5-20251001",
-                    max_tokens=400,
-                    messages=[{"role": "user", "content":
-                        f"Briefly explain what this means or refers to in 2-4 sentences. "
-                        f"Be concise and direct. If it's a technical term, code, error, "
-                        f"or concept, explain it. If it's a name, identify it.\n\n{text}"}],
-                )
-                return self._json({"text": msg.content[0].text.strip()})
-            except Exception as e:
-                return self._json({"error": str(e)}, 500)
+            if api_key and not _on_claude_plan():
+                try:
+                    import anthropic as _anthropic
+                    client = _anthropic.Anthropic(api_key=api_key)
+                    msg = client.messages.create(
+                        model="claude-haiku-4-5-20251001",
+                        max_tokens=400,
+                        messages=[{"role": "user", "content": prompt}],
+                    )
+                    return self._json({"text": msg.content[0].text.strip()})
+                except Exception as e:
+                    return self._json({"error": str(e)}, 500)
+            # Plan / no key → fall back to the claude CLI (uses OAuth subscription)
+            out, err = _claude_oneshot(prompt, model="haiku", timeout=35)
+            if err:
+                return self._json({"error": err}, 500)
+            return self._json({"text": out})
 
         if method == "POST" and path == "/api/suggest-branch":
             body = self._read_body()
