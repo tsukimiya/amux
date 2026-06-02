@@ -6474,6 +6474,23 @@ def _install_amux_commit_hook(work_dir: str) -> None:
         pass
 
 
+def _install_hooks_all_sessions() -> None:
+    """Proactively install the commit-stamping hook into every existing
+    session's repo, so attribution works for already-created sessions without
+    waiting for a restart or for someone to open the session's commits."""
+    try:
+        for envf in CC_SESSIONS.glob("*.env"):
+            try:
+                cfg = parse_env_file(envf)
+                d = cfg.get("CC_DIR", "")
+                if d:
+                    _install_amux_commit_hook(str(Path(d).expanduser()))
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False) -> tuple[bool, str]:
     """Start a session headless (no attach). Returns (success, message)."""
     if not _VALID_SESSION_NAME_RE.match(name):
@@ -37932,6 +37949,8 @@ def main():
     threading.Thread(target=_watch_server_env, daemon=True).start()
     # Watch notes directory for external edits (Obsidian, other editors)
     threading.Thread(target=_watch_notes_dir, daemon=True).start()
+    # Install the commit-stamping hook into all existing session repos
+    threading.Thread(target=_install_hooks_all_sessions, daemon=True).start()
 
     # Initial snapshot immediately, then unified scheduler takes over
     threading.Thread(target=_snapshot_all_sessions, daemon=True).start()
