@@ -2232,6 +2232,8 @@ def _snapshot_all_sessions():
     _HIBERNATE_STARTUP_GRACE = 600  # 10 min grace after server restart
     for f in CC_SESSIONS.glob("*.env"):
         name = f.stem
+        if _is_session_blocked(name):
+            continue
         if tmux_name(name) not in running_sessions:
             continue
         try:
@@ -5359,7 +5361,7 @@ def list_sessions() -> list:
         return sessions
     tmux_info = _tmux_info_map()
     # Pre-compute which sessions are running and batch-capture their panes
-    env_files = sorted(CC_SESSIONS.glob("*.env"))
+    env_files = [f for f in sorted(CC_SESSIONS.glob("*.env")) if not _is_session_blocked(f.stem)]
     running_names = [f.stem for f in env_files if tmux_name(f.stem) in tmux_info]
     captures = _tmux_capture_batch(running_names, 30) if running_names else {}
     # Token cache is refreshed by background job (_refresh_token_cache via scheduler)
@@ -36972,6 +36974,10 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                                        capture_output=True, timeout=5)
                 return self._json({"ok": True, "message": f"cloned as {new_name} (method: {method_used})", "started": ok})
             if action == "archive":
+                cfg_arc = parse_env_file(env_file) if env_file.exists() else {}
+                if cfg_arc.get("CC_PINNED") == "1" and not _is_session_blocked(name):
+                    slog(f"[archive-blocked] {name}: pinned session, rejecting archive from {self.client_address[0]}")
+                    return self._json({"error": "cannot archive pinned session — unpin first"}, 403)
                 ok, msg = archive_session(name)
                 return self._json({"ok": ok, "message": msg}, 200 if ok else 500)
             if action == "wake":
@@ -37000,7 +37006,7 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 return self._json({"ok": True})
             if action == "delete":
                 cfg_del = parse_env_file(env_file) if env_file.exists() else {}
-                if cfg_del.get("CC_PINNED") == "1":
+                if cfg_del.get("CC_PINNED") == "1" and not _is_session_blocked(name):
                     slog(f"[delete-blocked] {name}: pinned session, rejecting delete from {self.client_address[0]}")
                     return self._json({"error": "cannot delete pinned session — unpin first"}, 403)
                 slog(f"[delete] {name}: delete request from {self.client_address[0]}")
@@ -37377,6 +37383,8 @@ def _auto_archive_idle():
     archived = []
     for env_file in sorted(CC_SESSIONS.glob("*.env")):
         name = env_file.stem
+        if _is_session_blocked(name):
+            continue
         if name in protected:
             continue
         cfg = parse_env_file(env_file)
@@ -37409,6 +37417,15 @@ def _enforce_archived_stopped():
     for env_file in sorted(CC_SESSIONS.glob("*.env")):
         name = env_file.stem
         cfg = parse_env_file(env_file)
+        if _is_session_blocked(name):
+            if is_running(name):
+                try:
+                    stop_session(name)
+                    _kill_tmux_session(name)
+                    stopped.append(f"{name} (blocked)")
+                except Exception:
+                    pass
+            continue
         if cfg.get("CC_ARCHIVED") == "1" and is_running(name):
             try:
                 stop_session(name)
