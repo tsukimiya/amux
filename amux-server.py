@@ -13224,7 +13224,7 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
   <div class="peek-tabs">
     <button class="peek-tab active" id="peek-tab-terminal" onclick="setPeekTab('terminal')">Terminal</button>
     <button class="peek-tab" id="peek-tab-steering" onclick="setPeekTab('steering')">Steering<span class="peek-tab-count" id="peek-tab-steering-count"></span></button>
-    <button class="peek-tab" id="peek-tab-issues" onclick="setPeekTab('issues')">Issues</button>
+    <button class="peek-tab" id="peek-tab-issues" onclick="setPeekTab('issues')">Issues<span class="peek-tab-count" id="peek-tab-issues-count"></span></button>
     <button class="peek-tab" id="peek-tab-git" onclick="setPeekTab('git')">Worktree</button>
     <button class="peek-tab" id="peek-tab-commits" onclick="setPeekTab('commits')">Commits</button>
     <button class="peek-tab" id="peek-tab-schedules" onclick="setPeekTab('schedules')">Schedules<span class="peek-tab-count" id="peek-tab-schedules-count"></span></button>
@@ -16891,6 +16891,11 @@ function renderPeekIssues() {
   const count = document.getElementById('peek-issues-count');
   const items = (boardItems || []).filter(i => i.session === peekSession && !i.deleted);
   count.textContent = items.length ? items.length + ' issue' + (items.length === 1 ? '' : 's') : '';
+  const tabCount = document.getElementById('peek-tab-issues-count');
+  if (tabCount) {
+    if (items.length > 0) { tabCount.textContent = items.length; tabCount.classList.add('has-count'); }
+    else { tabCount.textContent = ''; tabCount.classList.remove('has-count'); }
+  }
   if (!items.length) {
     list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:12px 4px;">No issues for this session yet.</div>';
     return;
@@ -16920,6 +16925,10 @@ async function _peekUpdateTabCounts() {
     const s = sessions.find(s => s.name === sess);
     const sq = (s && s.steering) || [];
     setCount('peek-tab-steering-count', sq.length);
+  }
+  {
+    const n = (boardItems || []).filter(i => i.session === sess && !i.deleted).length;
+    setCount('peek-tab-issues-count', n);
   }
   try {
     const r = await fetch(API + '/api/schedules');
@@ -17466,7 +17475,7 @@ function openPeek(name, opts) {
   updatePeekStatus();
   document.getElementById('peek-body').innerHTML = '<span style="color:var(--dim)">Loading...</span>';
   // Reset tab badges; will be repopulated by _peekUpdateTabCounts
-  ['peek-tab-steering-count','peek-tab-schedules-count','peek-tab-notes-count'].forEach(id => {
+  ['peek-tab-steering-count','peek-tab-issues-count','peek-tab-schedules-count','peek-tab-notes-count'].forEach(id => {
     const el = document.getElementById(id);
     if (el) { el.textContent = ''; el.classList.remove('has-count'); }
   });
