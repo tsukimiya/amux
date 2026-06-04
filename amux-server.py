@@ -16970,6 +16970,7 @@ async function _peekLoadSchedules() {
         '<div style="display:flex;gap:4px;margin-top:4px;">' +
           '<button class="btn" style="font-size:0.7rem;padding:2px 8px;" onclick="event.stopPropagation();_peekToggleSchedule(\'' + esc(s.id) + '\',' + (s.enabled ? 0 : 1) + ')">' + (s.enabled ? 'Disable' : 'Enable') + '</button>' +
           '<button class="btn" style="font-size:0.7rem;padding:2px 8px;" onclick="event.stopPropagation();_peekRunSchedule(\'' + esc(s.id) + '\')">Run now</button>' +
+          '<button class="btn" style="font-size:0.7rem;padding:2px 8px;" onclick="event.stopPropagation();_peekEditSchedule(\'' + esc(s.id) + '\')">Edit</button>' +
           '<button class="btn" style="font-size:0.7rem;padding:2px 8px;color:var(--red);" onclick="event.stopPropagation();_peekDeleteSchedule(\'' + esc(s.id) + '\')">Delete</button>' +
         '</div>' +
       '</div>';
@@ -16994,6 +16995,12 @@ async function _peekDeleteSchedule(id) {
   if (!confirm('Delete this schedule?')) return;
   await apiCall(API + '/api/schedules/' + id, { method: 'DELETE' });
   _peekLoadSchedules();
+}
+async function _peekEditSchedule(id) {
+  // openSchedModal reads from the global `schedules` array, which the peek
+  // panel doesn't populate on its own — refresh it first so edit prefills.
+  await fetchSchedules();
+  openSchedModal(id);
 }
 function _peekNewSchedule() {
   const title = prompt('Schedule title:');
@@ -24407,6 +24414,7 @@ async function saveSchedModal() {
     await fetchSchedules();
     renderCalendar();
     renderScheduler();
+    if (typeof peekSession !== 'undefined' && peekSession) _peekLoadSchedules();
     closeSchedModal();
   }
 }
