@@ -13078,6 +13078,24 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
       </div>
     </div>
     <div class="field-group" style="margin-top:8px;">
+      <label class="field-label">Event triggers <span class="field-optional">(wake this session when something changes — runs in addition to the schedule above)</span></label>
+      <div style="display:flex;flex-direction:column;gap:4px;margin-top:2px;">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:0.8rem;">
+          <input type="checkbox" id="sched-trigger-idle" style="width:auto;accent-color:var(--accent);" onchange="updateSchedTriggerUI()">
+          A managed session goes idle <span style="color:var(--dim);font-size:0.7rem;">(a worker finished a turn)</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:0.8rem;">
+          <input type="checkbox" id="sched-trigger-board" style="width:auto;accent-color:var(--accent);" onchange="updateSchedTriggerUI()">
+          The board changes <span style="color:var(--dim);font-size:0.7rem;">(an issue is created/updated/moved)</span>
+        </label>
+      </div>
+      <div id="sched-trigger-cooldown-field" style="display:none;margin-top:6px;">
+        <label class="field-label">Trigger cooldown <span class="field-optional">(min seconds between event-fired runs)</span></label>
+        <input id="sched-trigger-cooldown" type="number" min="10" max="3600" value="120" style="width:100px;">
+      </div>
+      <div style="font-size:0.65rem;color:var(--dim);margin-top:2px;">This schedule's own session is never counted as a trigger, so it can't loop on itself.</div>
+    </div>
+    <div class="field-group" style="margin-top:8px;">
       <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:0.8rem;font-weight:500;">
         <input type="checkbox" id="sched-watch" style="width:auto;accent-color:var(--accent);" onchange="updateSchedWatchUI()">
         Watch response
@@ -23856,6 +23874,7 @@ function renderScheduler() {
               <span>runs: <strong>${s.run_count || 0}</strong></span>
               ${s.watch ? `<span style="color:var(--accent);">👁 watching</span>` : ''}
               ${s.done_pattern ? `<span style="color:var(--dim);">stop: <code style="font-size:0.65rem;">${esc(s.done_pattern)}</code></span>` : ''}
+              ${s.trigger_on ? `<span style="color:var(--accent);" title="Event-triggered (cooldown ${s.trigger_cooldown||120}s)">⚡ ${esc((s.trigger_on||'').split(',').map(t=>t==='session_idle'?'on idle':t==='board'?'on board':t).join(' + '))}</span>` : ''}
             </div>
             <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;">
               <button class="btn" style="font-size:0.72rem;padding:4px 12px;"
@@ -24539,6 +24558,11 @@ function updateSchedWatchUI() {
   document.getElementById('sched-watch-fields').style.display =
     document.getElementById('sched-watch').checked ? '' : 'none';
 }
+function updateSchedTriggerUI() {
+  const any = document.getElementById('sched-trigger-idle').checked ||
+              document.getElementById('sched-trigger-board').checked;
+  document.getElementById('sched-trigger-cooldown-field').style.display = any ? '' : 'none';
+}
 function updateSchedKindUI() {
   const kind = document.getElementById('sched-kind').value;
   document.getElementById('sched-session-group').style.display = kind === 'shell' ? 'none' : '';
@@ -24570,6 +24594,10 @@ function openSchedModal(editId) {
       document.getElementById('sched-done-pattern').value = s.done_pattern || '';
       document.getElementById('sched-done-action').value = s.done_action || 'disable';
       document.getElementById('sched-watch-timeout').value = s.watch_timeout || 120;
+      const trig = (s.trigger_on || '').split(',').map(x => x.trim());
+      document.getElementById('sched-trigger-idle').checked = trig.includes('session_idle');
+      document.getElementById('sched-trigger-board').checked = trig.includes('board');
+      document.getElementById('sched-trigger-cooldown').value = s.trigger_cooldown || 120;
     }
     document.getElementById('sched-save-btn').textContent = 'Update';
   } else {
@@ -24583,11 +24611,15 @@ function openSchedModal(editId) {
     document.getElementById('sched-done-pattern').value = '';
     document.getElementById('sched-done-action').value = 'disable';
     document.getElementById('sched-watch-timeout').value = 120;
+    document.getElementById('sched-trigger-idle').checked = false;
+    document.getElementById('sched-trigger-board').checked = false;
+    document.getElementById('sched-trigger-cooldown').value = 120;
     document.getElementById('sched-save-btn').textContent = 'Save';
   }
   updateSchedTypeUI();
   updateSchedRecUI();
   updateSchedWatchUI();
+  updateSchedTriggerUI();
   updateSchedKindUI();
   overlay.style.display = 'flex';
   requestAnimationFrame(() => overlay.classList.add('active'));
@@ -24628,9 +24660,14 @@ async function saveSchedModal() {
   const donePattern = document.getElementById('sched-done-pattern').value.trim();
   const doneAction = document.getElementById('sched-done-action').value;
   const watchTimeout = parseInt(document.getElementById('sched-watch-timeout').value) || 120;
+  const trig = [];
+  if (document.getElementById('sched-trigger-idle').checked) trig.push('session_idle');
+  if (document.getElementById('sched-trigger-board').checked) trig.push('board');
+  const triggerCooldown = parseInt(document.getElementById('sched-trigger-cooldown').value) || 120;
   const payload = { title, session, kind, command, sched_type: stype, recurrence: recurrence || null, run_at,
                     schedule_expr: schedExpr || null,
-                    watch, done_pattern: donePattern || null, done_action: doneAction, watch_timeout: watchTimeout };
+                    watch, done_pattern: donePattern || null, done_action: doneAction, watch_timeout: watchTimeout,
+                    trigger_on: trig.join(','), trigger_cooldown: triggerCooldown };
   const url = _schedEditId ? API + '/api/schedules/' + _schedEditId : API + '/api/schedules';
   const method = _schedEditId ? 'PATCH' : 'POST';
   const r = await apiCall(url, { method, headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
