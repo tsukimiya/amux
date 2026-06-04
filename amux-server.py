@@ -5493,6 +5493,56 @@ def _parse_task_time(raw_output: str) -> str:
 
 
 _session_prev_status: dict[str, str] = {}  # track status changes for board auto-updates
+_commit_guard_nudged: dict[str, bool] = {}  # session -> nudged this dirty episode (re-armed when clean)
+
+
+def _session_dirty_files(work_dir: str) -> list:
+    """Uncommitted/untracked files under a session's working directory (pathspec
+    scoped to work_dir so sibling sessions' changes in the same monorepo don't
+    count). Returns repo-relative paths; [] if clean or not a git repo."""
+    try:
+        r = subprocess.run(
+            ["git", "-C", work_dir, "status", "--porcelain", "--", "."],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode != 0:
+            return []
+        return [ln[3:].strip() for ln in r.stdout.splitlines() if ln.strip()]
+    except Exception:
+        return []
+
+
+def _commit_guard(name: str) -> bool:
+    """When a session goes idle, if it left uncommitted work, nudge it once per
+    dirty episode to commit (re-armed once the tree goes clean). amux only detects
+    and reminds — the model decides what/how to commit. Returns True iff it sent a
+    nudge this cycle (caller then skips auto-pickup so we don't pile on)."""
+    try:
+        wd = _session_work_dir(name)
+        if not wd:
+            return False
+        files = _session_dirty_files(wd)
+        if not files:
+            _commit_guard_nudged.pop(name, None)   # clean → re-arm for the next episode
+            return False
+        if _commit_guard_nudged.get(name):
+            return False   # already nudged this episode; don't re-nag, allow normal flow
+        _commit_guard_nudged[name] = True
+        n = len(files)
+        sample = "\n".join("  " + f for f in files[:10]) + ("\n  …" if n > 10 else "")
+        msg = (f"You went idle with {n} uncommitted change(s) under your working directory ({wd}):\n"
+               f"{sample}\n\n"
+               "Commit completed work now with a clear, descriptive message (group related changes). "
+               "If something is intentionally incomplete, commit a WIP checkpoint and say so. "
+               "Don't leave the working tree dirty.")
+        if is_running(name):
+            send_text(name, msg)
+        _push_alert("uncommitted", name, f"{n} uncommitted file(s) under {wd} — nudged to commit")
+        slog(f"[commit-guard] {name}: nudged ({n} uncommitted)")
+        return True
+    except Exception as e:
+        slog(f"[commit-guard] {name}: {e}")
+        return False
 
 def list_sessions() -> list:
     sessions = []
@@ -5549,10 +5599,12 @@ def list_sessions() -> list:
                 # A worker finished a turn → emit a closed-loop event so any
                 # orchestrator schedule subscribed to 'session_idle' can wake.
                 _fire_schedule_event("session_idle", source_session=name)
-                def _complete_then_pickup(sname=name):
+                def _on_idle(sname=name):
+                    nudged = _commit_guard(sname)        # remind to commit dirty work
                     _complete_session_board_issue(sname)
-                    _pickup_next_board_task(sname)
-                threading.Thread(target=_complete_then_pickup, daemon=True).start()
+                    if not nudged:                       # don't pile a new task on a commit nudge
+                        _pickup_next_board_task(sname)
+                threading.Thread(target=_on_idle, daemon=True).start()
             elif status == "idle" and prev == "idle" and not running:
                 threading.Thread(target=_complete_session_board_issue, args=(name,), daemon=True).start()
             elif status == "" and prev in ("active", "waiting", "idle"):
@@ -6006,7 +6058,7 @@ def _evict_stale_caches():
         _model_cache.pop(k, None)
     # Prune session-keyed dicts for sessions that no longer have .env files
     live_sessions = {f.stem for f in CC_SESSIONS.glob("*.env")}
-    for d in (_session_auto_actions, _yolo_last_responded, _last_jsonl_backup, _session_prev_status):
+    for d in (_session_auto_actions, _yolo_last_responded, _last_jsonl_backup, _session_prev_status, _commit_guard_nudged):
         stale_keys = [k for k in d if k not in live_sessions]
         for k in stale_keys:
             d.pop(k, None)
@@ -6022,6 +6074,7 @@ def _cleanup_session_state(name: str):
     _yolo_last_responded.pop(name, None)
     _last_jsonl_backup.pop(name, None)
     _session_prev_status.pop(name, None)
+    _commit_guard_nudged.pop(name, None)
     with _send_locks_lock:
         _send_locks.pop(name, None)
 
