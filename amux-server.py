@@ -5496,13 +5496,29 @@ _session_prev_status: dict[str, str] = {}  # track status changes for board auto
 _commit_guard_nudged: dict[str, bool] = {}  # session -> nudged this dirty episode (re-armed when clean)
 
 
-def _session_dirty_files(work_dir: str) -> list:
-    """Uncommitted/untracked files under a session's working directory (pathspec
-    scoped to work_dir so sibling sessions' changes in the same monorepo don't
-    count). Returns repo-relative paths; [] if clean or not a git repo."""
+def _session_dirty_files(name: str, work_dir: str) -> list:
+    """Uncommitted/untracked files this session owns. Scoped to its working dir,
+    and — for a session whose cwd is a monorepo root — excludes subdirectories that
+    are *other* sessions' working dirs, so each session is only accountable for its
+    own territory. Returns paths; [] if clean or not a git repo."""
     try:
+        wd = str(Path(work_dir).expanduser().resolve())
+        # Exclude other sessions' cwds that live inside this one (ownership partition).
+        excludes = []
+        for f in CC_SESSIONS.glob("*.env"):
+            if f.stem == name:
+                continue
+            try:
+                od = parse_env_file(f).get("CC_DIR")
+            except Exception:
+                od = None
+            if not od:
+                continue
+            od = str(Path(od).expanduser().resolve())
+            if od != wd and (od + os.sep).startswith(wd + os.sep):
+                excludes.append(":(exclude)" + os.path.relpath(od, wd))
         r = subprocess.run(
-            ["git", "-C", work_dir, "status", "--porcelain", "--", "."],
+            ["git", "-C", wd, "status", "--porcelain", "--", "."] + excludes,
             capture_output=True, text=True, timeout=10,
         )
         if r.returncode != 0:
@@ -5521,7 +5537,7 @@ def _commit_guard(name: str) -> bool:
         wd = _session_work_dir(name)
         if not wd:
             return False
-        files = _session_dirty_files(wd)
+        files = _session_dirty_files(name, wd)
         if not files:
             _commit_guard_nudged.pop(name, None)   # clean → re-arm for the next episode
             return False
