@@ -5528,11 +5528,19 @@ def _session_dirty_files(name: str, work_dir: str) -> list:
         return []
 
 
+def _commit_guard_enabled() -> bool:
+    """Global on/off for the idle commit-guard (configurable in the UI settings →
+    persisted as AMUX_COMMIT_GUARD in ~/.amux/server.env). Default ON."""
+    return os.environ.get("AMUX_COMMIT_GUARD", "1").strip().lower() not in ("0", "false", "off", "no")
+
+
 def _commit_guard(name: str) -> bool:
     """When a session goes idle, if it left uncommitted work, nudge it once per
     dirty episode to commit (re-armed once the tree goes clean). amux only detects
     and reminds — the model decides what/how to commit. Returns True iff it sent a
     nudge this cycle (caller then skips auto-pickup so we don't pile on)."""
+    if not _commit_guard_enabled():
+        return False
     try:
         wd = _session_work_dir(name)
         if not wd:
@@ -12315,6 +12323,15 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
               onclick="saveApiKey()">Save</button>
           </div>
           <div id="settings-apikey-status" style="font-size:0.7rem;color:var(--dim);margin-top:4px;"></div>
+        </div>
+        <div class="settings-sep"></div>
+        <div class="settings-section" id="settings-commitguard-section">
+          <div class="settings-section-label">Commit guard</div>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:0.8rem;">
+            <input type="checkbox" id="settings-commitguard-toggle" style="width:auto;accent-color:var(--accent);" onchange="saveCommitGuard(this.checked)">
+            Nudge sessions to commit when they go idle with uncommitted work
+          </label>
+          <div id="settings-commitguard-status" style="font-size:0.7rem;color:var(--dim);margin-top:4px;"></div>
         </div>
         <div class="settings-sep"></div>
         <div class="settings-section" id="settings-notes-section">
@@ -26942,6 +26959,7 @@ function toggleSettings() {
     _renderInstanceSwitcher();
     // Populate the notes-folder row
     _notesLoadSource();
+    loadCommitGuard();
   }
 }
 
@@ -27095,6 +27113,31 @@ async function saveApiKey() {
     } else {
       if (st) st.textContent = 'Save failed';
     }
+  } catch(e) { if (st) st.textContent = 'Error: ' + e.message; }
+}
+
+// ── Commit guard ─────────────────────────────────────────────────────────────
+async function loadCommitGuard() {
+  try {
+    const r = await fetch('/api/settings/commit-guard');
+    const d = await r.json();
+    const t = document.getElementById('settings-commitguard-toggle');
+    const st = document.getElementById('settings-commitguard-status');
+    if (t) t.checked = !!d.enabled;
+    if (st) st.textContent = d.enabled ? 'On — sessions are nudged to commit on idle' : 'Off';
+  } catch(e) {}
+}
+async function saveCommitGuard(enabled) {
+  const st = document.getElementById('settings-commitguard-status');
+  try {
+    const r = await fetch('/api/settings/commit-guard', {
+      method: 'PATCH', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({enabled})
+    });
+    if (r.ok) {
+      if (st) st.textContent = enabled ? 'On — sessions are nudged to commit on idle' : 'Off';
+      showToast('Commit guard ' + (enabled ? 'enabled' : 'disabled'));
+    } else if (st) { st.textContent = 'Save failed'; }
   } catch(e) { if (st) st.textContent = 'Error: ' + e.message; }
 }
 
@@ -35972,6 +36015,25 @@ return "not_found"
                 return self._json({"ok": True, "model": model})
 
         # ── Settings env (ANTHROPIC_API_KEY etc.) ─────────────────────────────
+        if path == "/api/settings/commit-guard":
+            if method == "GET":
+                return self._json({"enabled": _commit_guard_enabled()})
+            if method == "PATCH":
+                body = self._read_body()
+                enabled = bool(body.get("enabled", True))
+                val = "1" if enabled else "0"
+                lines = _server_env_file.read_text().splitlines() if _server_env_file.exists() else []
+                found = False
+                for i, line in enumerate(lines):
+                    if line.startswith("AMUX_COMMIT_GUARD=") or line.startswith("AMUX_COMMIT_GUARD ="):
+                        lines[i] = f"AMUX_COMMIT_GUARD={val}"; found = True; break
+                if not found:
+                    lines.append(f"AMUX_COMMIT_GUARD={val}")
+                _server_env_file.parent.mkdir(parents=True, exist_ok=True)
+                _server_env_file.write_text("\n".join(lines) + "\n")
+                os.environ["AMUX_COMMIT_GUARD"] = val  # live effect
+                return self._json({"ok": True, "enabled": enabled})
+
         if path == "/api/settings/env":
             _allowed_env_keys = {"ANTHROPIC_API_KEY", "OPENAI_API_KEY"}
             if method == "GET":
