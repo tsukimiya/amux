@@ -6020,6 +6020,10 @@ _git_subprocess_sem = threading.Semaphore(4)  # limit concurrent git subprocesse
 _GIT_INFO_DETAIL_TTL = 10  # seconds — detail view can be slightly fresher
 _GIT_INFO_CACHE_MAX_AGE = 300  # evict entries older than 5 min to prevent unbounded growth
 
+_sessions_git_cache: dict = {"data": None, "time": 0}
+_sessions_git_cache_lock = threading.Lock()
+_SESSIONS_GIT_CACHE_TTL = 15
+
 
 def _git_info(work_dir: str, detail: bool = False) -> dict:
     """Return {branch, repo} for a directory. Returns empty strings if not a git repo.
@@ -33004,24 +33008,40 @@ class CCHandler(BaseHTTPRequestHandler):
 
         # GET /api/sessions-git — bulk git info for all sessions (avoids 80+ individual requests)
         if method == "GET" and path == "/api/sessions-git":
-            from concurrent.futures import ThreadPoolExecutor
-            sc = _sse_cache["sessions"]
-            sess_list = sc["data"] if sc["data"] is not None else []
-            def _get_git(s):
-                name = s.get("name", "")
-                wd = s.get("dir", "")
-                if not wd:
+            sgc = _sessions_git_cache
+            if sgc["data"] is not None and time.time() - sgc["time"] < _SESSIONS_GIT_CACHE_TTL:
+                return self._json(sgc["data"])
+            if not _sessions_git_cache_lock.acquire(blocking=False):
+                if sgc["data"] is not None:
+                    return self._json(sgc["data"])
+                _sessions_git_cache_lock.acquire()
+                _sessions_git_cache_lock.release()
+                return self._json(sgc["data"] or {})
+            try:
+                if sgc["data"] is not None and time.time() - sgc["time"] < _SESSIONS_GIT_CACHE_TTL:
+                    return self._json(sgc["data"])
+                from concurrent.futures import ThreadPoolExecutor
+                sc = _sse_cache["sessions"]
+                sess_list = sc["data"] if sc["data"] is not None else []
+                def _get_git(s):
+                    name = s.get("name", "")
+                    wd = s.get("dir", "")
+                    if not wd:
+                        return None
+                    info = _git_info(wd)
+                    if info.get("branch"):
+                        return {"name": name, **info}
                     return None
-                info = _git_info(wd)
-                if info.get("branch"):
-                    return {"name": name, **info}
-                return None
-            results = {}
-            with ThreadPoolExecutor(max_workers=4) as pool:
-                for r in pool.map(_get_git, sess_list):
-                    if r:
-                        results[r["name"]] = r
-            return self._json(results)
+                results = {}
+                with ThreadPoolExecutor(max_workers=4) as pool:
+                    for r in pool.map(_get_git, sess_list):
+                        if r:
+                            results[r["name"]] = r
+                sgc["data"] = results
+                sgc["time"] = time.time()
+                return self._json(results)
+            finally:
+                _sessions_git_cache_lock.release()
 
         # GET/POST /api/memory/global
         if path == "/api/memory/global":
