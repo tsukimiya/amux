@@ -5578,12 +5578,37 @@ def _commit_guard_enabled() -> bool:
     return os.environ.get("AMUX_COMMIT_GUARD", "1").strip().lower() not in ("0", "false", "off", "no")
 
 
+def _commit_guard_session_enabled(name: str) -> bool:
+    """Per-session override for the commit-guard.
+    Returns True/False when the session .env has AMUX_COMMIT_GUARD_SESSION set,
+    otherwise falls back to the global toggle."""
+    env_file = CC_SESSIONS / f"{name}.env"
+    if env_file.exists():
+        val = parse_env_file(env_file).get("AMUX_COMMIT_GUARD_SESSION", "").strip().lower()
+        if val in ("0", "false", "off", "no"):
+            return False
+        if val in ("1", "true", "on", "yes"):
+            return True
+    return _commit_guard_enabled()
+
+
+def _set_commit_guard_session(name: str, enabled: bool | None):
+    """Write (or clear) the per-session commit-guard override in the session .env."""
+    env_file = CC_SESSIONS / f"{name}.env"
+    cfg = parse_env_file(env_file) if env_file.exists() else {}
+    if enabled is None:
+        cfg.pop("AMUX_COMMIT_GUARD_SESSION", None)
+    else:
+        cfg["AMUX_COMMIT_GUARD_SESSION"] = "1" if enabled else "0"
+    _write_env(env_file, cfg)
+
+
 def _commit_guard(name: str) -> bool:
     """When a session goes idle, if it left uncommitted work, nudge it once per
     dirty episode to commit (re-armed once the tree goes clean). amux only detects
     and reminds — the model decides what/how to commit. Returns True iff it sent a
     nudge this cycle (caller then skips auto-pickup so we don't pile on)."""
-    if not _commit_guard_enabled():
+    if not _commit_guard_session_enabled(name):
         return False
     try:
         wd = _session_work_dir(name)
@@ -13497,6 +13522,7 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
         <button class="search-clear" onclick="event.stopPropagation();clearPeekSearch()">&#x2715;</button>
       </div>
       <button class="btn peek-split-btn" id="peek-split-toggle" onclick="togglePeekSplit()" title="Split: file browser">&#x1F4C2;</button>
+      <button class="btn" id="peek-commitguard-btn" onclick="togglePeekCommitGuard()" title="Commit guard: nudge this session to commit on idle" style="font-size:0.7rem;padding:3px 8px;opacity:0.5;">&#x1F6E1;</button>
       <button class="btn" onclick="togglePeekFocus()" id="peek-focus-btn" title="Focus mode — hide controls">&#x25B4;</button>
       <button class="btn" onclick="closePeek()">Close</button>
     </div>
@@ -17922,6 +17948,7 @@ function openPeek(name, opts) {
     if (el) { el.textContent = ''; el.classList.remove('has-count'); }
   });
   _peekUpdateTabCounts();
+  loadPeekCommitGuard(name);
   updateConnectionStatus();
   const peekOv = document.getElementById('peek-overlay');
   peekOv.classList.add('active');
@@ -27176,6 +27203,54 @@ async function saveApiKey() {
 }
 
 // ── Commit guard ─────────────────────────────────────────────────────────────
+let _peekCommitGuardOverride = null;  // null=global, true=on, false=off
+
+async function loadPeekCommitGuard(sessionName) {
+  if (!sessionName) return;
+  try {
+    const r = await fetch(API + '/api/sessions/' + encodeURIComponent(sessionName) + '/commit-guard');
+    if (!r.ok) return;
+    const d = await r.json();
+    _peekCommitGuardOverride = d.override;
+    _renderPeekCommitGuardBtn(d.enabled, d.override, d.global);
+  } catch(e) {}
+}
+
+function _renderPeekCommitGuardBtn(enabled, override, globalEnabled) {
+  const btn = document.getElementById('peek-commitguard-btn');
+  if (!btn) return;
+  btn.style.opacity = enabled ? '1' : '0.35';
+  btn.style.color = enabled ? 'var(--green, #3fb950)' : '';
+  const overrideLabel = override === null ? 'following global (' + (globalEnabled ? 'on' : 'off') + ')' : (override ? 'on for this session' : 'off for this session');
+  btn.title = 'Commit guard: ' + overrideLabel + ' — click to toggle';
+}
+
+async function togglePeekCommitGuard() {
+  if (!peekSession) return;
+  const btn = document.getElementById('peek-commitguard-btn');
+  // Cycle: global-on → session-off → global; global-off → session-on → global
+  const r = await fetch(API + '/api/sessions/' + encodeURIComponent(peekSession) + '/commit-guard');
+  if (!r.ok) return;
+  const cur = await r.json();
+  // If currently override is set, clear it (follow global). Otherwise flip the global value.
+  let nextOverride;
+  if (cur.override !== null) {
+    nextOverride = null;  // remove override, follow global
+  } else {
+    nextOverride = !cur.global;  // override to opposite of global
+  }
+  const pr = await fetch(API + '/api/sessions/' + encodeURIComponent(peekSession) + '/commit-guard', {
+    method: 'PATCH', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({enabled: nextOverride})
+  });
+  if (!pr.ok) return;
+  const d = await pr.json();
+  _peekCommitGuardOverride = d.override;
+  _renderPeekCommitGuardBtn(d.enabled, d.override, d.global);
+  const label = d.override === null ? 'global (' + (d.global ? 'on' : 'off') + ')' : (d.enabled ? 'on' : 'off');
+  showToast('Commit guard: ' + label + ' for ' + peekSession);
+}
+
 async function loadCommitGuard() {
   try {
     const r = await fetch('/api/settings/commit-guard');
@@ -37159,6 +37234,13 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 files = _session_dirty_files(name, wd) if wd else []
                 return self._json({"name": name, "dirty": bool(files),
                                    "count": len(files), "files": files[:50]})
+            if action == "commit-guard":
+                env_file_cg = CC_SESSIONS / f"{name}.env"
+                cfg_cg = parse_env_file(env_file_cg) if env_file_cg.exists() else {}
+                per_session = cfg_cg.get("AMUX_COMMIT_GUARD_SESSION", "").strip().lower()
+                override = None if per_session == "" else (per_session not in ("0", "false", "off", "no"))
+                return self._json({"name": name, "enabled": _commit_guard_session_enabled(name),
+                                   "global": _commit_guard_enabled(), "override": override})
             if action == "meta":
                 cfg = parse_env_file(env_file)
                 meta = _load_meta(name)
@@ -37668,6 +37750,14 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
             return self._json({"error": "not found"}, 404)
 
         if method == "PATCH":
+            if action == "commit-guard":
+                body = self._read_body()
+                # enabled: true/false sets per-session override; null clears it (follow global)
+                raw = body.get("enabled")
+                override = None if raw is None else bool(raw)
+                _set_commit_guard_session(name, override)
+                return self._json({"ok": True, "enabled": _commit_guard_session_enabled(name),
+                                   "global": _commit_guard_enabled(), "override": override})
             if action == "config":
                 body = self._read_body()
                 if not isinstance(body, dict):
