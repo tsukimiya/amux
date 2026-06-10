@@ -13323,26 +13323,39 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
 
 <!-- Schedule modal -->
 <div id="sched-overlay" class="board-edit-overlay" onclick="if(event.target===this)closeSchedModal()" style="display:none;">
-  <div class="board-edit-box" style="max-width:420px;">
+  <div class="board-edit-box" style="max-width:700px;width:100%;">
     <div style="font-weight:600;font-size:0.9rem;margin-bottom:10px;">&#x23F0; Scheduled Task</div>
     <div class="field-group">
       <label class="field-label">Title</label>
       <input id="sched-title" type="text" placeholder="What should run?" autocomplete="off">
     </div>
-    <div class="field-group">
-      <label class="field-label">Kind</label>
-      <select id="sched-kind" class="board-detail-session-select" style="width:100%;" onchange="updateSchedKindUI()">
-        <option value="tmux">Send to session (Claude)</option>
-        <option value="shell">Run shell command</option>
-      </select>
+    <div style="display:flex;gap:12px;">
+      <div class="field-group" style="flex:1;">
+        <label class="field-label">Kind</label>
+        <select id="sched-kind" class="board-detail-session-select" style="width:100%;" onchange="updateSchedKindUI()">
+          <option value="tmux">Send to session (Claude)</option>
+          <option value="shell">Run shell command</option>
+        </select>
+      </div>
+      <div class="field-group" id="sched-session-group" style="flex:1;">
+        <label class="field-label">Session</label>
+        <select id="sched-session" class="board-detail-session-select" style="width:100%;"></select>
+      </div>
     </div>
-    <div class="field-group" id="sched-session-group">
-      <label class="field-label">Session</label>
-      <select id="sched-session" class="board-detail-session-select" style="width:100%;"></select>
-    </div>
     <div class="field-group">
-      <label class="field-label" id="sched-command-label">Command</label>
-      <textarea id="sched-command" rows="5" placeholder="e.g. /status or npm run build" autocomplete="off" style="resize:vertical;font-family:monospace;font-size:0.85rem;min-height:100px;white-space:pre;"></textarea>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+        <label class="field-label" id="sched-command-label" style="margin-bottom:0;">Command</label>
+        <div class="notes-mode-tabs" id="sched-command-tabs" style="margin:0;">
+          <button class="notes-mode-tab active" id="sched-cmd-tab-edit" onclick="schedCmdSwitchMode('edit')">Edit</button>
+          <button class="notes-mode-tab" id="sched-cmd-tab-preview" onclick="schedCmdSwitchMode('preview')">Preview</button>
+        </div>
+      </div>
+      <div id="sched-command-editor-wrap" style="position:relative;">
+        <textarea id="sched-command" rows="6" placeholder="e.g. /status or npm run build" autocomplete="off"
+          style="width:100%;box-sizing:border-box;resize:vertical;font-size:0.85rem;min-height:120px;line-height:1.55;padding:10px 12px;background:var(--card);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:inherit;"
+          oninput="autoGrow(this)"></textarea>
+      </div>
+      <div id="sched-command-preview" class="notes-preview md-content" style="display:none;min-height:120px;max-height:360px;padding:10px 12px;background:var(--card);border:1px solid var(--border);border-radius:6px;overflow-y:auto;"></div>
     </div>
     <div class="field-group">
       <label class="field-label">Schedule</label>
@@ -25031,6 +25044,24 @@ function updateSchedTriggerUI() {
               document.getElementById('sched-trigger-board').checked;
   document.getElementById('sched-trigger-cooldown-field').style.display = any ? '' : 'none';
 }
+function schedCmdSwitchMode(mode) {
+  const ta = document.getElementById('sched-command');
+  const preview = document.getElementById('sched-command-preview');
+  const editTab = document.getElementById('sched-cmd-tab-edit');
+  const prevTab = document.getElementById('sched-cmd-tab-preview');
+  if (mode === 'preview') {
+    preview.innerHTML = renderMarkdown(ta.value) || '<span style="color:var(--dim);font-size:0.85rem;">Nothing to preview</span>';
+    ta.style.display = 'none';
+    preview.style.display = '';
+    editTab.classList.remove('active');
+    prevTab.classList.add('active');
+  } else {
+    preview.style.display = 'none';
+    ta.style.display = '';
+    editTab.classList.add('active');
+    prevTab.classList.remove('active');
+  }
+}
 function updateSchedKindUI() {
   const kind = document.getElementById('sched-kind').value;
   document.getElementById('sched-session-group').style.display = kind === 'shell' ? 'none' : '';
@@ -25091,8 +25122,13 @@ function openSchedModal(editId) {
   updateSchedWatchUI();
   updateSchedTriggerUI();
   updateSchedKindUI();
+  schedCmdSwitchMode('edit');
   overlay.style.display = 'flex';
-  requestAnimationFrame(() => overlay.classList.add('active'));
+  requestAnimationFrame(() => {
+    overlay.classList.add('active');
+    const box = overlay.querySelector('.board-edit-box');
+    if (box) box.scrollTop = 0;
+  });
   setTimeout(() => document.getElementById('sched-title').focus(), 50);
 }
 function closeSchedModal() {
