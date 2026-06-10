@@ -13351,11 +13351,10 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
         </div>
       </div>
       <div id="sched-command-editor-wrap" style="position:relative;">
-        <textarea id="sched-command" rows="6" placeholder="e.g. /status or npm run build" autocomplete="off"
-          style="width:100%;box-sizing:border-box;resize:vertical;font-size:0.85rem;min-height:120px;line-height:1.55;padding:10px 12px;background:var(--card);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:inherit;"
-          oninput="autoGrow(this)"></textarea>
+        <textarea id="sched-command" rows="5" placeholder="e.g. /status or npm run build" autocomplete="off"
+          style="width:100%;box-sizing:border-box;resize:vertical;font-size:0.85rem;min-height:90px;line-height:1.55;padding:10px 12px;background:var(--card);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:inherit;"></textarea>
       </div>
-      <div id="sched-command-preview" class="notes-preview md-content" style="display:none;min-height:120px;max-height:360px;padding:10px 12px;background:var(--card);border:1px solid var(--border);border-radius:6px;overflow-y:auto;"></div>
+      <div id="sched-command-preview" class="md-content" style="display:none;min-height:90px;max-height:280px;padding:10px 12px;background:var(--card);border:1px solid var(--border);border-radius:6px;overflow-y:auto;font-size:0.85rem;line-height:1.55;color:var(--text);"></div>
     </div>
     <div class="field-group">
       <label class="field-label">Schedule</label>
@@ -25052,12 +25051,12 @@ function schedCmdSwitchMode(mode) {
   if (mode === 'preview') {
     preview.innerHTML = renderMarkdown(ta.value) || '<span style="color:var(--dim);font-size:0.85rem;">Nothing to preview</span>';
     ta.style.display = 'none';
-    preview.style.display = '';
+    preview.style.display = 'block';
     editTab.classList.remove('active');
     prevTab.classList.add('active');
   } else {
     preview.style.display = 'none';
-    ta.style.display = '';
+    ta.style.display = 'block';
     editTab.classList.add('active');
     prevTab.classList.remove('active');
   }
