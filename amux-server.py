@@ -2304,8 +2304,18 @@ def _claude_ui_visible(clean_output: str) -> bool:
         s = l.strip()
         if s and "\u2700" <= s[0] <= "\u27bf" and s[0] != "\u276f":
             return True
-    # Codex prompt: line starting with > or › (only if "codex" banner seen in output)
-    has_codex = any("codex" in l.lower() for l in lines[:15])
+    # Codex UI patterns — checked unconditionally so long-running sessions still
+    # match after the initial "codex" banner has scrolled past the capture window
+    for l in lines[-12:]:
+        s = l.strip()
+        # "• Working (Xs • esc to interrupt)" spinner — U+2022 is below dingbats range
+        if s.startswith("•") and "working" in s.lower() and "esc to interrupt" in s.lower():
+            return True
+        # Codex model status bar: "gpt-5.5 xhigh · ~/path"
+        if "·" in s and re.search(r"gpt-\d|o[34][-m]", s):
+            return True
+    # Codex idle prompt: > or › (gate on "codex" in first 15 OR last 20 lines)
+    has_codex = any("codex" in l.lower() for l in lines[:15] + lines[-20:])
     if has_codex:
         for l in lines[-5:]:
             ls = l.strip()
