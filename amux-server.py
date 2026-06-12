@@ -18669,13 +18669,18 @@ async function refreshPeek() {
     if (_sendingSnapshot && newHTML !== _sendingSnapshot) clearSendingIndicator();
     lastPeekHTML = newHTML;
     const hasSearch = peekSearchQuery.trim().length > 0;
-    applyPeekSearch(hasSearch);
+    // When user has scrolled up, skip DOM update to avoid fidgeting the view.
+    // Buffer in lastPeekHTML and flush when they resume.
+    if (!_peekScrollLocked || hasSearch) {
+      applyPeekSearch(hasSearch);
+    }
     if (!_peekScrollLocked && atBottom && !hasSearch) {
       body.scrollTop = body.scrollHeight;
       _hideScrollLockBadge(body);
     } else if (_peekScrollLocked) {
       _showScrollLockBadge(body, () => {
         _peekScrollLocked = false;
+        applyPeekSearch(false);
         body.scrollTop = body.scrollHeight;
         _hideScrollLockBadge(body);
       });
