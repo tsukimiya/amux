@@ -2365,6 +2365,8 @@ def _at_shell_prompt(clean_output: str) -> bool:
     return False
 
 
+_snapshot_running = False
+
 def _snapshot_all_sessions():
     """Capture scrollback for health checks on all running sessions.
 
@@ -2378,6 +2380,16 @@ def _snapshot_all_sessions():
     4. Auto-restart: if CC_AUTO_CONTINUE=1 and Claude has exited to a shell prompt,
        restart it automatically (handles context-limit exits mid-task).
     """
+    global _snapshot_running
+    if _snapshot_running:
+        return
+    _snapshot_running = True
+    try:
+        _snapshot_all_sessions_inner()
+    finally:
+        _snapshot_running = False
+
+def _snapshot_all_sessions_inner():
     # Fetch running tmux sessions once to avoid spawning a subprocess per session
     running_sessions = set()
     try:
