@@ -2410,7 +2410,7 @@ def _snapshot_all_sessions_inner():
         if tmux_name(name) not in running_sessions:
             continue
         try:
-            output = tmux_capture(name, 5000)
+            output = tmux_capture(name, 500)
             if not output:
                 continue
 
