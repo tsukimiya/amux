@@ -15363,7 +15363,7 @@ const _ALERT_LABELS = {
   thinking_reset: (a) => ({ icon: '\U0001f504', title: 'Thinking reset', body: a.session }),
   auto_continue:  (a) => ({ icon: '▶️', title: 'Agent continued', body: a.session }),
   steering_delivered: (a) => ({ icon: '\U0001f4e8', title: 'Steering delivered', body: a.session }),
-  task_pickup:      (a) => ({ icon: '\U0001f4cb', title: 'Task assigned', body: a.session + ' — ' + a.message }),
+  task_pickup:      (a) => ({ icon: '\U0001f4cb', title: 'Task assigned', body: a.session + (a.message ? ' — ' + a.message : '') }),
 };
 
 function _fireAmuxAlert(a) {
