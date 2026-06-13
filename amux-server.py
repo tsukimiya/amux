@@ -9331,6 +9331,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .badge.codex { background: rgba(16,185,129,0.2); color: #10b981; }
   .badge.gemini { background: rgba(168,85,247,0.2); color: #c084fc; }
   .badge.iterm2 { background: rgba(0,200,160,0.18); color: #00c8a0; }
+  .badge.opencode { background: rgba(245,158,11,0.2); color: #f59e0b; }
 
   /* Expanded panel */
   .panel { display: none; margin-top: 12px; }
@@ -13691,6 +13692,7 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
         <button type="button" id="create-provider-claude" class="btn provider-btn selected" onclick="_selectProvider('claude')">Claude Code</button>
         <button type="button" id="create-provider-codex" class="btn provider-btn" onclick="_selectProvider('codex')">Codex</button>
         <button type="button" id="create-provider-gemini" class="btn provider-btn" onclick="_selectProvider('gemini')">Gemini</button>
+        <button type="button" id="create-provider-opencode" class="btn provider-btn" onclick="_selectProvider('opencode')">OpenCode</button>
       </div>
     </div>
     <div class="field-group">
@@ -15474,17 +15476,19 @@ function providerLabel(provider) {
   if (provider === 'codex') return 'Codex';
   if (provider === 'gemini') return 'Gemini';
   if (provider === 'iterm2') return 'iTerm2';
+  if (provider === 'opencode') return 'OpenCode';
   return 'Claude';
 }
 
 function sessionProvider(s) {
   const p = ((s && s.provider) || 'claude').toLowerCase();
-  return (p === 'codex' || p === 'gemini' || p === 'iterm2') ? p : 'claude';
+  return (p === 'codex' || p === 'gemini' || p === 'iterm2' || p === 'opencode') ? p : 'claude';
 }
 
 function providerDefaultModel(provider) {
   if (provider === 'codex') return 'gpt-5.5';
   if (provider === 'gemini') return 'auto';
+  if (provider === 'opencode') return 'anthropic/claude-sonnet-4-5';
   return window._AMUX_DEFAULT_MODEL || 'sonnet';
 }
 
@@ -15496,6 +15500,7 @@ function sessionConfiguredModel(s) {
 function providerYoloFlag(provider) {
   if (provider === 'codex') return '--dangerously-bypass-approvals-and-sandbox';
   if (provider === 'gemini') return '--yolo';
+  // opencode has no YOLO flag (default all-permit); return claude's flag for UI consistency
   return '--dangerously-skip-permissions';
 }
 
@@ -16390,7 +16395,8 @@ function editField(session, field, current, provider) {
     const providers = [
       {v:'claude',l:'Claude Code'},
       {v:'codex',l:'Codex'},
-      {v:'gemini',l:'Gemini'}
+      {v:'gemini',l:'Gemini'},
+      {v:'opencode',l:'OpenCode'}
     ];
     sel.innerHTML = '';
     providers.forEach(p => { const o = document.createElement('option'); o.value = p.v; o.textContent = p.l; sel.appendChild(o); });
@@ -16416,7 +16422,15 @@ function editField(session, field, current, provider) {
       {v:'gemini-2.5-flash',l:'gemini-2.5-flash'},{v:'gemini-2.5-flash-lite',l:'gemini-2.5-flash-lite'},
       {v:'gemini-3-pro-preview',l:'gemini-3-pro-preview'},{v:'gemini-3-flash-preview',l:'gemini-3-flash-preview'}
     ];
-    const models = provider === 'codex' ? codexModels : (provider === 'gemini' ? geminiModels : claudeModels);
+    const opencodeModels = [
+      {v:'',l:'Default'},
+      {v:'anthropic/claude-sonnet-4-5',l:'anthropic/claude-sonnet-4-5'},
+      {v:'anthropic/claude-opus-4-5',l:'anthropic/claude-opus-4-5'},
+      {v:'anthropic/claude-haiku-4-5',l:'anthropic/claude-haiku-4-5'},
+      {v:'openai/gpt-5.5',l:'openai/gpt-5.5'},
+      {v:'google/gemini-2.5-pro',l:'google/gemini-2.5-pro'}
+    ];
+    const models = provider === 'codex' ? codexModels : (provider === 'gemini' ? geminiModels : (provider === 'opencode' ? opencodeModels : claudeModels));
     sel.innerHTML = '';
     models.forEach(m => { const o = document.createElement('option'); o.value = m.v; o.textContent = m.l; sel.appendChild(o); });
     inpWrap.style.display = 'none';
@@ -22099,6 +22113,7 @@ function _selectProvider(p) {
   document.getElementById('create-provider-claude').classList.toggle('selected', p === 'claude');
   document.getElementById('create-provider-codex').classList.toggle('selected', p === 'codex');
   document.getElementById('create-provider-gemini').classList.toggle('selected', p === 'gemini');
+  document.getElementById('create-provider-opencode').classList.toggle('selected', p === 'opencode');
   // Hide branch/template/session-name options for non-Claude providers since they use different mechanics
   const isClaude = p === 'claude';
   document.getElementById('create-branch-enabled').closest('.field-group').style.display = isClaude ? '' : 'none';
@@ -22110,6 +22125,7 @@ function openCreate() {
   document.getElementById('create-provider-claude').classList.add('selected');
   document.getElementById('create-provider-codex').classList.remove('selected');
   document.getElementById('create-provider-gemini').classList.remove('selected');
+  document.getElementById('create-provider-opencode').classList.remove('selected');
   document.getElementById('create-branch-enabled').closest('.field-group').style.display = '';
   document.getElementById('create-template-field').style.display = '';
   document.getElementById('create-name').value = '';
