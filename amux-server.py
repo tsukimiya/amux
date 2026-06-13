@@ -7309,6 +7309,7 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                 if _api_key_val:
                     _env_args += ["-e", f"ANTHROPIC_API_KEY={_api_key_val}"]
             for _ekey in [
+                "ANTHROPIC_API_BASE",
                 "OPENAI_API_KEY",
                 "GEMINI_API_KEY",
                 "GOOGLE_API_KEY",
@@ -14575,7 +14576,7 @@ async function apikeySetupSave() {
   const err = document.getElementById('apikey-setup-err');
   const btn = document.getElementById('apikey-setup-btn');
   const key = (inp?.value || '').trim();
-  if (!key.startsWith('sk-ant-')) { if (err) err.textContent = 'Key must start with sk-ant-'; return; }
+  if (key.length < 10) { if (err) err.textContent = 'Key is too short'; return; }
   if (err) err.textContent = '';
   if (btn) btn.textContent = 'Saving…';
   try {
@@ -36571,7 +36572,7 @@ return "not_found"
                     _l = _l.strip()
                     if _l.startswith("ANTHROPIC_API_KEY="):
                         _val = _l[len("ANTHROPIC_API_KEY="):].strip()
-                        if _val.startswith("sk-ant-"):
+                        if _val:
                             has_key_in_env = True
                         break
             # Also check for OAuth login in ~/.claude.json
@@ -38944,8 +38945,11 @@ def _watch_notes_dir():
 def _validate_api_key() -> tuple[bool, str]:
     """Check if the current ANTHROPIC_API_KEY is valid with a minimal API call.
 
-    Returns (is_valid, error_message). Skips validation if OAuth is configured.
+    Returns (is_valid, error_message). Skips validation if OAuth or custom API base is configured.
     """
+    # Skip if custom API base is configured (third-party provider)
+    if os.environ.get("ANTHROPIC_API_BASE", "").strip():
+        return True, ""
     # Skip if OAuth is present — key isn't needed
     try:
         import json as _j
