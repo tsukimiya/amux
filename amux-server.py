@@ -11460,7 +11460,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   /* Override dark terminal bg for note panes */
   .grid-stack-item:has(.gp-note-body) .grid-stack-item-content { background: var(--card); }
   /* Workspace terminal pane */
-  .gp-term-body { flex: 1; min-height: 0; overflow: hidden; background: #0d1117; }
+  .gp-term-body { flex: 1; min-height: 0; background: #0d1117; }
   .grid-stack-item:has(.gp-term-body) .grid-stack-item-content { background: #0d1117; }
   .gp-term-reconnect { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(13,17,23,0.85); z-index: 10; }
   .gp-term-reconnect button { padding: 6px 16px; background: var(--accent); color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 0.8rem; }
@@ -26499,6 +26499,19 @@ function _wsTermRefitAll() {
   Object.values(_wsTerm).forEach(p => { if (p.fit) { try { p.fit.fit(); } catch(e) {} } });
 }
 
+// Persist ptyId so reconnect after sleep/reload finds the existing PTY
+function _wsTermSavePtyId(pid, ptyId) {
+  try {
+    const map = JSON.parse(localStorage.getItem('amux_ws_term_pty') || '{}');
+    if (ptyId) map[pid] = ptyId; else delete map[pid];
+    localStorage.setItem('amux_ws_term_pty', JSON.stringify(map));
+  } catch(e) {}
+}
+function _wsTermGetSavedPtyId(pid) {
+  try { return JSON.parse(localStorage.getItem('amux_ws_term_pty') || '{}')[pid] || null; }
+  catch(e) { return null; }
+}
+
 function wsAddTermPane(x, y, w, h, pid) {
   if (!_grid) return;
   pid = pid || _wsNextTermId();
@@ -26515,8 +26528,27 @@ function wsAddTermPane(x, y, w, h, pid) {
     '<div class="gp-term-body" id="' + sid + '-body" style="position:relative;"></div>';
   const widget = _grid.addWidget({ id: pid, x, y, w: w || 6, h: h || 8, content });
   _wsTerm[pid] = { widget, term: null, fit: null, poll: null, ptyId: null };
-  setTimeout(() => _initWsTermPane(pid), 80);
+  setTimeout(() => _initWsTermPane(pid), 150);
   _gridSaveLayout();
+}
+
+function _wsTermSetupHandlers(pid) {
+  const p = _wsTerm[pid];
+  if (!p || !p.term || !p.ptyId) return;
+  p.term.onData(d => {
+    if (!p.ptyId) return;
+    fetch(API + '/api/terminal/' + p.ptyId + '/input', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data: btoa(unescape(encodeURIComponent(d))) }),
+    }).catch(() => {});
+  });
+  p.term.onResize(({ cols, rows }) => {
+    if (!p.ptyId) return;
+    fetch(API + '/api/terminal/' + p.ptyId + '/resize', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cols, rows }),
+    }).catch(() => {});
+  });
 }
 
 async function _initWsTermPane(pid) {
@@ -26552,6 +26584,30 @@ async function _initWsTermPane(pid) {
   term.open(container);
   fit.fit();
   p.term = term; p.fit = fit;
+  // Second fit after paint to correct dimensions in flex layout
+  requestAnimationFrame(() => { try { fit.fit(); } catch(e) {} });
+
+  // Try to reconnect to an existing PTY (survives laptop sleep / page reload)
+  const savedPtyId = _wsTermGetSavedPtyId(pid);
+  if (savedPtyId) {
+    try {
+      const r = await fetch(API + '/api/terminal/' + savedPtyId + '/output');
+      const d = await r.json();
+      if (d.alive) {
+        p.ptyId = savedPtyId;
+        if (d.data) {
+          const bytes = Uint8Array.from(atob(d.data), c => c.charCodeAt(0));
+          term.write(bytes);
+        }
+        _wsTermSetupHandlers(pid);
+        _wsTermStartPoll(pid);
+        term.focus();
+        return;
+      }
+    } catch(e) {}
+    // Saved PTY is gone — clear it and fall through to create a new one
+    _wsTermSavePtyId(pid, null);
+  }
 
   const dims = fit.proposeDimensions();
   const cols = dims ? dims.cols : 100;
@@ -26566,27 +26622,13 @@ async function _initWsTermPane(pid) {
     const data = await r.json();
     if (data.error) { term.writeln('\r\n\x1b[31mError: ' + data.error + '\x1b[0m'); return; }
     p.ptyId = data.id;
+    _wsTermSavePtyId(pid, data.id);
   } catch(e) {
     term.writeln('\r\n\x1b[31mFailed to start shell: ' + e.message + '\x1b[0m');
     return;
   }
 
-  term.onData(d => {
-    if (!p.ptyId) return;
-    fetch(API + '/api/terminal/' + p.ptyId + '/input', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ data: btoa(unescape(encodeURIComponent(d))) }),
-    }).catch(() => {});
-  });
-
-  term.onResize(({ cols, rows }) => {
-    if (!p.ptyId) return;
-    fetch(API + '/api/terminal/' + p.ptyId + '/resize', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cols, rows }),
-    }).catch(() => {});
-  });
-
+  _wsTermSetupHandlers(pid);
   _wsTermStartPoll(pid);
   term.focus();
 }
@@ -26606,6 +26648,7 @@ function _wsTermStartPoll(pid) {
       if (!d.alive) {
         p.term.writeln('\r\n\x1b[33m[Process exited]\x1b[0m');
         clearInterval(p.poll); p.poll = null; p.ptyId = null;
+        _wsTermSavePtyId(pid, null);
       }
     } catch(e) {}
   }, 50);
@@ -26628,6 +26671,7 @@ function wsRemoveTermPane(pid) {
   if (p.poll) { clearInterval(p.poll); p.poll = null; }
   if (p.ptyId) { fetch(API + '/api/terminal/' + p.ptyId, { method: 'DELETE' }).catch(() => {}); p.ptyId = null; }
   if (p.term) { try { p.term.dispose(); } catch(e) {} p.term = null; }
+  _wsTermSavePtyId(pid, null);
   try { _grid.removeWidget(p.widget); } catch(e) {}
   delete _wsTerm[pid];
   _gridSaveLayout();
