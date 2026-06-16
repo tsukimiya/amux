@@ -4314,7 +4314,7 @@ def _complete_session_board_issue(session_name: str):
             "SELECT i.id FROM issues i "
             "WHERE i.session=? AND i.deleted IS NULL "
             "AND i.status IN ('doing') "
-            "ORDER BY i.created DESC",
+            "ORDER BY i.updated DESC",
             (session_name,)
         ).fetchall()
         if not rows:
@@ -4330,6 +4330,7 @@ def _complete_session_board_issue(session_name: str):
                 continue
             _append_board_log(row["id"], "Session completed")
             db.execute("UPDATE issues SET status='done', updated=? WHERE id=?", (now, row["id"]))
+            break
         db.commit()
         _board_changed()
     except Exception:
@@ -5555,6 +5556,45 @@ def _build_system_metrics() -> dict:
     return result
 
 
+def _pane_has_pending_question(raw: str) -> bool:
+    """Return True if the pane ends with a free-form question awaiting input.
+
+    Claude sometimes finishes a turn with a plain question and becomes idle.
+    _detect_claude_status returns 'idle' in that case, which would otherwise
+    trigger premature board auto-completion. This helper acts as a completion
+    gate by looking at the last substantive output line.
+    """
+    clean = _STRIP_ANSI.sub("", raw)
+    lines = [l for l in clean.splitlines() if l.strip()]
+    if not lines:
+        return False
+
+    # Look at the last up-to-12 content lines, bottom-up.
+    for l in reversed(lines[-12:]):
+        s = l.strip()
+        if not s:
+            continue
+        # Status bar
+        if "\u23f5\u23f5" in s or "bypass permissions" in s.lower() or "plan mode" in s.lower():
+            continue
+        # Spinner / dingbat
+        if "\u2700" <= s[0] <= "\u27bf":
+            continue
+        # Box-drawing borders
+        if s[0] in "\u256d\u2570\u2502\u256e\u256f":
+            continue
+        # Prompt / selector lines
+        if "\u276f" in s:
+            continue
+
+        # First substantive line is the last output line.
+        if s.endswith("?") or s.endswith("\uff1f"):
+            return True
+        return False
+
+    return False
+
+
 def _detect_claude_status(raw_output: str) -> str:
     """Detect Claude Code status from tmux output.
 
@@ -5919,7 +5959,9 @@ def list_sessions() -> list:
                 # A worker finished a turn → emit a closed-loop event so any
                 # orchestrator schedule subscribed to 'session_idle' can wake.
                 _fire_schedule_event("session_idle", source_session=name)
-                def _on_idle(sname=name):
+                def _on_idle(sname=name, pane=raw):
+                    if _pane_has_pending_question(pane):
+                        return  # Claude is asking a question; wait for human answer
                     nudged = _commit_guard(sname)        # remind to commit dirty work
                     _complete_session_board_issue(sname)
                     if not nudged:                       # don't pile a new task on a commit nudge
@@ -5927,8 +5969,8 @@ def list_sessions() -> list:
                 threading.Thread(target=_on_idle, daemon=True).start()
             elif status == "idle" and prev == "idle" and not running:
                 threading.Thread(target=_complete_session_board_issue, args=(name,), daemon=True).start()
-            elif status == "" and prev in ("active", "waiting", "idle"):
-                # Session went from running to not running
+            elif status == "" and not running and prev in ("active", "waiting", "idle"):
+                # Session stopped or crashed — finalize its active board task
                 threading.Thread(target=_complete_session_board_issue, args=(name,), daemon=True).start()
             _session_prev_status[name] = status if running else ""
             # Filter for intelligible content lines
