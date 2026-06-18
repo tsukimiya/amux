@@ -4140,17 +4140,38 @@ def _session_instructions(name: str) -> str:
     return (_load_meta(name).get("instructions") or "").strip()
 
 
+_VAGUE_INPUTS = {
+    "continue", "cont", "go", "ok", "okay", "yes", "yeah", "yep", "yup", "no",
+    "done", "hi", "hello", "hey", "thanks", "thank you", "great", "good", "nice",
+    "sure", "proceed", "next", "more", "again", "retry", "stop", "wait", "do it",
+    "sounds good", "looks good", "perfect", "lgtm", "go ahead", "keep going",
+}
+
 def _summarize_task_bg(session_name: str, text: str):
-    """Summarize a message into a 3-word task label via `claude -p`, then auto-create a board issue."""
+    """Summarize a message into a 3-word task label via `claude -p`, then auto-create a board issue.
+    For vague one-word inputs (continue, yeah, etc.) supplements with recent terminal output."""
     def _run():
         try:
+            # Strip timestamp prefix like "[03:47 PM] " before checking vagueness
+            stripped = re.sub(r'^\[.*?\]\s*', '', text).strip().lower().rstrip(".")
+            is_vague = stripped in _VAGUE_INPUTS or len(stripped) <= 4
+            if is_vague:
+                # Pull last 25 lines of terminal output for real context
+                raw = tmux_capture(session_name, 50)
+                clean = re.sub(r'\x1b\[[0-9;]*[mK]', '', raw)
+                ctx_lines = [l.strip() for l in clean.splitlines() if l.strip()
+                             and not l.strip().startswith('─') and '❯' not in l][-20:]
+                context = " ".join(ctx_lines)[:600]
+                prompt = f"Based on this terminal output, summarize what task is being worked on in 3 words: {context}"
+            else:
+                prompt = f"Summarize this task in 3 words: {text[:400]}"
             result = subprocess.run(
                 [
                     "claude", "-p",
                     "--model", "haiku",
                     "--system-prompt", "You are a task labeler. Output ONLY 3 words in title case. No punctuation, no explanation.",
                     "--no-session-persistence",
-                    f"Summarize this task in 3 words: {text[:400]}",
+                    prompt,
                 ],
                 capture_output=True, text=True, timeout=60,
             )
