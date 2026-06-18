@@ -4141,19 +4141,20 @@ def _session_instructions(name: str) -> str:
 
 
 def _summarize_task_bg(session_name: str, text: str):
-    """Call Claude Haiku in a background thread to summarize a message into a 3-word task label,
-    then auto-create a board issue for the session."""
+    """Summarize a message into a 3-word task label via `claude -p`, then auto-create a board issue."""
     def _run():
         try:
-            import anthropic
-            client = anthropic.Anthropic()
-            msg = client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=20,
-                messages=[{"role": "user", "content":
-                    f"Summarize this task in 3 words or fewer (title case, no punctuation): {text[:500]}"}],
+            result = subprocess.run(
+                [
+                    "claude", "-p",
+                    "--model", "haiku",
+                    "--system-prompt", "You are a task labeler. Output ONLY 3 words in title case. No punctuation, no explanation.",
+                    "--no-session-persistence",
+                    f"Summarize this task in 3 words: {text[:400]}",
+                ],
+                capture_output=True, text=True, timeout=30,
             )
-            summary = msg.content[0].text.strip().rstrip(".")
+            summary = result.stdout.strip().rstrip(".") if result.returncode == 0 else ""
             if summary:
                 _update_meta(session_name, task_summary=summary)
                 _auto_create_board_issue(session_name, summary, text)
