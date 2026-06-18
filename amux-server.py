@@ -4302,6 +4302,9 @@ def _session_board_issue_id(session_name: str) -> str | None:
         return None
 
 
+_board_complete_guard: dict[str, float] = {}
+
+
 def _complete_session_board_issue(session_name: str):
     """Move a session's active board issues to done.
 
@@ -4310,6 +4313,9 @@ def _complete_session_board_issue(session_name: str):
     SessionEnd hook (board-gh-sync.py) which has gh CLI access for posting
     GH comments.
     """
+    now_ts = time.time()
+    if now_ts - _board_complete_guard.get(session_name, 0) < 5:
+        return
     try:
         db = get_db()
         rows = db.execute(
@@ -4321,18 +4327,20 @@ def _complete_session_board_issue(session_name: str):
         ).fetchall()
         if not rows:
             return
-        now = int(time.time())
+        non_gh = []
         for row in rows:
-            # Skip gh-linked tasks — the SessionEnd hook handles those
             gh_tag = db.execute(
                 "SELECT 1 FROM issue_tags WHERE issue_id=? AND tag LIKE 'gh:%' LIMIT 1",
                 (row["id"],)
             ).fetchone()
-            if gh_tag:
-                continue
-            _append_board_log(row["id"], "Session completed")
-            db.execute("UPDATE issues SET status='done', updated=? WHERE id=?", (now, row["id"]))
-            break
+            if not gh_tag:
+                non_gh.append(row["id"])
+        if len(non_gh) != 1:
+            return
+        _board_complete_guard[session_name] = now_ts
+        now = int(time.time())
+        _append_board_log(non_gh[0], "Session completed")
+        db.execute("UPDATE issues SET status='done', updated=? WHERE id=?", (now, non_gh[0]))
         db.commit()
         _board_changed()
     except Exception:
@@ -6476,7 +6484,7 @@ def _evict_stale_caches():
         _model_cache.pop(k, None)
     # Prune session-keyed dicts for sessions that no longer have .env files
     live_sessions = {f.stem for f in CC_SESSIONS.glob("*.env")}
-    for d in (_session_auto_actions, _yolo_last_responded, _last_jsonl_backup, _session_prev_status, _commit_guard_nudged):
+    for d in (_session_auto_actions, _yolo_last_responded, _last_jsonl_backup, _session_prev_status, _commit_guard_nudged, _board_complete_guard):
         stale_keys = [k for k in d if k not in live_sessions]
         for k in stale_keys:
             d.pop(k, None)
@@ -6493,6 +6501,7 @@ def _cleanup_session_state(name: str):
     _last_jsonl_backup.pop(name, None)
     _session_prev_status.pop(name, None)
     _commit_guard_nudged.pop(name, None)
+    _board_complete_guard.pop(name, None)
     with _send_locks_lock:
         _send_locks.pop(name, None)
 
@@ -38441,6 +38450,7 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     threading.Thread(target=_send_after_ready, args=(name, initial_prompt), daemon=True).start()
                 return self._json({"ok": ok, "message": msg, "resumed": bool(meta.get("cc_session_name") or meta.get("cc_conversation_id"))}, 200 if ok else 500)
             if action == "stop":
+                _session_prev_status[name] = ""   # prevent polling double-fire
                 def _bg_stop(sname=name):
                     try:
                         ok, msg = stop_session(sname)
