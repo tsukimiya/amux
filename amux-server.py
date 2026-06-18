@@ -15546,6 +15546,7 @@ function render() {
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','model','${esc(model||"")}','${esc(provider)}')"><span class="mi">&#x2699;</span> Model${model ? ': '+esc(model) : ''}</div>
           <div class="card-menu-item" onclick="event.stopPropagation();toggleYolo('${s.name}')"><span class="mi">${isYolo?'&#x2611;':'&#x2610;'}</span> YOLO mode</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','desc','${esc(s.desc||"")}')"><span class="mi">&#x1F4DD;</span> Description</div>
+          <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','task','${esc(s.task_name||"")}')"><span class="mi">&#x270F;</span> Task label${s.task_name ? '' : ' (none)'}</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','tags','${esc(s.tags.join(", "))}')"><span class="mi">&#x1F3F7;</span> Tags</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','dir','${esc(s.dir)}')"><span class="mi">&#x1F4C1;</span> Directory</div>
           ${s.running ? `<div class="card-menu-item" onclick="event.stopPropagation();closeAllMenus();doRestart('${s.name}')"><span class="mi">&#x21BB;</span> Restart</div>` : ''}
@@ -15595,7 +15596,7 @@ function render() {
         <button class="btn primary" style="width:100%;" onclick="doStart('${s.name}')">&#x25B6; Start</button>
       </div>` : ''}
       <div class="panel" onclick="event.stopPropagation()">
-        ${isExp && s.task_name ? `<div class="card-task-name"><span class="tn-label">Task:</span>${esc(s.task_name)}</div>` : ''}
+        ${isExp && s.task_name ? `<div class="card-task-name" onclick="event.stopPropagation();editField('${s.name}','task','${esc(s.task_name)}')" title="Click to edit task label" style="cursor:pointer;"><span class="tn-label">Task:</span>${esc(s.task_name)}</div>` : ''}
         ${isExp && s.running ? `<div class="card-timing">
           ${s.session_created ? `<div class="timing-item"><span class="timing-label">Session</span><span class="timing-value">${fmtDuration(Math.floor(Date.now()/1000) - s.session_created)}</span></div>` : ''}
           ${s.task_time ? `<div class="timing-item"><span class="timing-label">Task</span><span class="timing-value accent">${esc(s.task_time)}</span></div>` : ''}
@@ -16312,8 +16313,8 @@ if (window._AMUX_DEFAULT_MODEL) {
 let editState = null;  // {session, field, current}
 function editField(session, field, current, provider) {
   closeAllMenus();
-  const titles = { name: 'Rename session', provider: 'Change provider', model: 'Change model', dir: 'Change directory', desc: 'Set description', tags: 'Edit tags', duplicate: 'Duplicate session', clone: 'Clone & continue' };
-  const placeholders = { name: 'Session name', model: 'e.g. opus, sonnet, haiku', dir: window._cloudEmail ? '/root' : '/path/to/project', desc: 'Brief description...', tags: 'e.g. work, frontend, urgent', duplicate: 'New session name', clone: 'New session name' };
+  const titles = { name: 'Rename session', provider: 'Change provider', model: 'Change model', dir: 'Change directory', desc: 'Set description', tags: 'Edit tags', task: 'Edit task label', duplicate: 'Duplicate session', clone: 'Clone & continue' };
+  const placeholders = { name: 'Session name', model: 'e.g. opus, sonnet, haiku', dir: window._cloudEmail ? '/root' : '/path/to/project', desc: 'Brief description...', tags: 'e.g. work, frontend, urgent', task: 'e.g. Fix login bug (blank to auto-generate)', duplicate: 'New session name', clone: 'New session name' };
   document.getElementById('edit-title').textContent = titles[field] || 'Edit';
   const inp = document.getElementById('edit-input');
   const sel = document.getElementById('edit-select');
@@ -16383,7 +16384,7 @@ async function submitEdit() {
   const val = (editState.field === 'model' || editState.field === 'provider')
     ? document.getElementById('edit-select').value.trim()
     : document.getElementById('edit-input').value.trim();
-  if (!val && editState.field !== 'desc' && editState.field !== 'tags' && editState.field !== 'model') return;
+  if (!val && editState.field !== 'desc' && editState.field !== 'tags' && editState.field !== 'model' && editState.field !== 'task') return;
   const { session, field } = editState;
   closeEdit();
   if (field === 'duplicate') {
@@ -16420,6 +16421,11 @@ async function submitEdit() {
     await apiCall(API + '/api/sessions/' + session + '/config', {
       method: 'PATCH', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ desc: val })
+    });
+  } else if (field === 'task') {
+    await apiCall(API + '/api/sessions/' + session + '/config', {
+      method: 'PATCH', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ task_summary: val })
     });
   } else if (field === 'tags') {
     await apiCall(API + '/api/sessions/' + session + '/config', {
@@ -38621,6 +38627,11 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                         threading.Thread(target=_restart_in_new_dir, daemon=True).start()
                         return self._json({"ok": True, "message": "directory updated — restarting session"})
                     return self._json({"ok": True, "message": "directory updated"})
+
+                # Override task label (empty string clears the override so model re-generates)
+                if "task_summary" in body:
+                    _update_meta(name, task_summary=body["task_summary"].strip())
+                    return self._json({"ok": True, "message": "task label updated"})
 
                 # Change description
                 if "desc" in body:
