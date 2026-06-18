@@ -18776,7 +18776,9 @@ let peekCmdOpen = true;
 function togglePeekFocus() {
   const ov = document.getElementById('peek-overlay');
   const on = ov.classList.toggle('peek-focus');
-  document.getElementById('peek-focus-title').textContent = peekSession || '';
+  const _fs = sessions.find(s => s.name === peekSession);
+  const _ft = _fs && _fs.task_name;
+  document.getElementById('peek-focus-title').textContent = _ft ? (peekSession + ' — ' + _ft) : (peekSession || '');
   localStorage.setItem('peekFocus', on ? '1' : '');
 }
 
