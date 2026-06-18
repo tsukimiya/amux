@@ -3120,7 +3120,8 @@ CREATE TABLE IF NOT EXISTS issues (
     created     INTEGER NOT NULL,
     updated     INTEGER NOT NULL,
     deleted     INTEGER,
-    owner_type  TEXT NOT NULL DEFAULT 'human'
+    owner_type  TEXT NOT NULL DEFAULT 'human',
+    blocked_by  TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS issue_tags (
     issue_id    TEXT NOT NULL,
@@ -3809,6 +3810,7 @@ def _init_db():
         "ALTER TABLE issues ADD COLUMN gcal_event_id TEXT",
         "ALTER TABLE issues ADD COLUMN pos REAL NOT NULL DEFAULT 0",
         "ALTER TABLE issues ADD COLUMN notified INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE issues ADD COLUMN blocked_by TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE schedules ADD COLUMN kind TEXT NOT NULL DEFAULT 'tmux'",
     ]:
         try:
@@ -4428,6 +4430,7 @@ def _load_board(done_limit: int = 100) -> list:
                i.due, i.due_time, i.created, i.updated, i.owner_type,
                COALESCE(i.pinned, 0) AS pinned,
                COALESCE(i.pos, 0) AS pos,
+               i.blocked_by,
                GROUP_CONCAT(t.tag) AS tags_csv"""
     if done_limit > 0:
         # Active items (unlimited) UNION most recent done/verified/discarded
@@ -4460,7 +4463,19 @@ def _load_board(done_limit: int = 100) -> list:
         item = dict(row)
         tags_csv = item.pop("tags_csv") or ""
         item["tags"] = [t for t in tags_csv.split(",") if t]
+        bb_raw = item.get("blocked_by") or ""
+        item["blocked_by"] = [b.strip() for b in bb_raw.split(",") if b.strip()]
         result.append(item)
+    # Build lookup for is_blocked computation
+    _items_by_id = {it["id"]: it for it in result}
+    for it in result:
+        _blocked = False
+        for bid in it.get("blocked_by", []):
+            blocker = _items_by_id.get(bid)
+            if blocker and blocker.get("status") not in ("done", "verified", "discarded"):
+                _blocked = True
+                break
+        it["is_blocked"] = _blocked
     result.sort(key=lambda x: (-x.get("pinned", 0),
                                 0 if x.get("pos", 0) == 0 else -1,
                                 x.get("pos", 0),
@@ -4483,6 +4498,7 @@ def _item_by_id(bid: str) -> dict | None:
                   i.due, i.due_time, i.created, i.updated, i.owner_type,
                   COALESCE(i.pinned, 0) AS pinned,
                   COALESCE(i.pos, 0) AS pos,
+                  i.blocked_by,
                   GROUP_CONCAT(t.tag) AS tags_csv
            FROM issues i
            LEFT JOIN issue_tags t ON t.issue_id = i.id
@@ -4495,7 +4511,43 @@ def _item_by_id(bid: str) -> dict | None:
     item = dict(row)
     tags_csv = item.pop("tags_csv") or ""
     item["tags"] = [t for t in tags_csv.split(",") if t]
+    bb_raw = item.get("blocked_by") or ""
+    item["blocked_by"] = [b.strip() for b in bb_raw.split(",") if b.strip()]
+    _blocked = False
+    for b_id in item.get("blocked_by", []):
+        blocker = db.execute(
+            "SELECT status FROM issues WHERE id = ? AND deleted IS NULL", (b_id,)
+        ).fetchone()
+        if blocker and blocker["status"] not in ("done", "verified", "discarded"):
+            _blocked = True
+            break
+    item["is_blocked"] = _blocked
     return item
+
+
+def _check_blocked_by_cycle(db, start_id, new_blocked_by_list):
+    """Returns True if adding new_blocked_by_list to start_id would create a cycle."""
+    rows = db.execute("SELECT id, blocked_by FROM issues WHERE deleted IS NULL").fetchall()
+    blocked_map = {}
+    for row in rows:
+        bb = (row["blocked_by"] or "").strip()
+        blocked_map[row["id"]] = [b.strip() for b in bb.split(",") if b.strip()]
+    blocked_map[start_id] = new_blocked_by_list
+    visited = set()
+    path = set()
+    def dfs(node):
+        if node in path:
+            return True
+        if node in visited:
+            return False
+        path.add(node)
+        for neighbor in blocked_map.get(node, []):
+            if dfs(neighbor):
+                return True
+        path.remove(node)
+        visited.add(node)
+        return False
+    return dfs(start_id)
 
 
 def _prefix_from_session(session: str) -> str:
@@ -11232,6 +11284,19 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   body.board-dragging .board-card { transition: none !important; }
   .board-card:active { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(88,166,255,0.2); }
   .board-card-pinned { border-color: rgba(88,166,255,0.35); box-shadow: 0 0 0 1px rgba(88,166,255,0.12); }
+  .board-card-blocked { opacity: 0.6; }
+  .board-card-blocked:hover { opacity: 0.8; }
+  .board-card-blocked-badge {
+    background: rgba(248,81,73,0.15); color: var(--red);
+    font-size: 0.62rem; padding: 1px 6px; border-radius: 4px;
+    font-weight: 600; white-space: nowrap;
+  }
+  .board-card-blocked-link {
+    color: var(--red); font-size: 0.6rem; cursor: pointer;
+    text-decoration: none; border-bottom: 1px dashed rgba(248,81,73,0.4);
+    white-space: nowrap;
+  }
+  .board-card-blocked-link:hover { color: #ff7b72; }
   .board-pin-btn {
     position: absolute; top: 6px; right: 30px;
     width: 22px; height: 22px; padding: 0; border: none; background: none;
@@ -11281,6 +11346,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     .board-session-items { padding: 0 2px 4px 12px; }
     .board-session-name { font-size: 0.78rem; }
     .board-session-count { font-size: 0.62rem !important; padding: 1px 5px !important; }
+    .board-card-blocked-badge { font-size: 0.58rem; padding: 2px 6px; min-height: 24px; display: inline-flex; align-items: center; }
+    .board-card-blocked-link { font-size: 0.58rem; padding: 2px 4px; min-height: 24px; display: inline-flex; align-items: center; }
+    .bd-blocked-chip { min-height: 44px; padding: 8px 10px; }
   }
   @media (max-width: 400px) {
     .board-col { min-width: 140px; max-width: 260px; }
@@ -11458,6 +11526,19 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   .board-detail-title-input::placeholder { color: var(--dim); }
   .board-detail-row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+  .bd-blocked-chip {
+    display: inline-flex; align-items: center; gap: 4px;
+    background: rgba(248,81,73,0.1); color: var(--red);
+    font-size: 0.72rem; padding: 2px 6px 2px 8px; border-radius: 6px;
+    cursor: pointer; margin: 2px;
+    border: 1px solid rgba(248,81,73,0.2);
+  }
+  .bd-blocked-chip:hover { background: rgba(248,81,73,0.2); }
+  .bd-blocked-chip-x {
+    font-size: 0.8rem; color: rgba(248,81,73,0.6); cursor: pointer;
+    padding: 0 2px; line-height: 1;
+  }
+  .bd-blocked-chip-x:hover { color: var(--red); }
   .board-detail-status-row { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
   .board-detail-status-btn {
     padding: 4px 13px; border-radius: 20px; font-size: 0.75rem; font-weight: 600;
@@ -13762,6 +13843,18 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
       <span style="font-size:0.78rem;color:var(--dim);">Due:</span>
       <input type="date" id="bd-due" class="board-detail-session-select" style="flex:1;cursor:pointer;">
       <input type="time" id="bd-due-time" class="board-detail-session-select" style="width:110px;cursor:pointer;" title="Time (optional — leave blank for all-day)">
+    </div>
+    <div class="board-detail-row" style="align-items:flex-start;">
+      <span style="font-size:0.78rem;color:var(--dim);padding-top:7px;">Blocked by:</span>
+      <div style="flex:1;">
+        <div class="be-tag-wrap" id="bd-blocked-wrap" onclick="document.getElementById('bd-blocked-input').focus()">
+        </div>
+        <input id="bd-blocked-input" class="be-tag-input" type="text" placeholder="Issue ID (e.g. MP-1)"
+          autocomplete="off" autocorrect="off" autocapitalize="none"
+          oninput="_bdBlockedUpdate()"
+          onkeydown="_bdBlockedKeydown(event)">
+        <div id="bd-blocked-suggestions" class="be-tag-suggestions"></div>
+      </div>
     </div>
     <div class="board-detail-row" style="align-items:flex-start;">
       <span style="font-size:0.78rem;color:var(--dim);padding-top:7px;">Tags:</span>
@@ -25025,7 +25118,7 @@ function _renderBoardCard(item) {
   const tags = item.tags || [];
   const firstLine = (item.desc || '').split('\n')[0].slice(0, 80);
   const pinned = item.pinned ? 1 : 0;
-  let h = '<div class="board-card' + (pinned ? ' board-card-pinned' : '') + '" data-id="' + item.id + '" onclick="openBoardDetail(\'' + item.id + '\')">';
+  let h = '<div class="board-card' + (pinned ? ' board-card-pinned' : '') + (item.is_blocked ? ' board-card-blocked' : '') + '" data-id="' + item.id + '" onclick="openBoardDetail(\'' + item.id + '\')">';
   h += '<div class="board-drag-handle" onclick="event.stopPropagation()" title="Drag to move"><svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><circle cx="3.5" cy="2.5" r="1.25"/><circle cx="8.5" cy="2.5" r="1.25"/><circle cx="3.5" cy="6" r="1.25"/><circle cx="8.5" cy="6" r="1.25"/><circle cx="3.5" cy="9.5" r="1.25"/><circle cx="8.5" cy="9.5" r="1.25"/></svg></div>';
   h += '<button class="board-pin-btn' + (pinned ? ' active' : '') + '" onclick="event.stopPropagation();_togglePin(\'' + item.id + '\')" title="' + (pinned ? 'Unpin' : 'Pin to top') + '">&#x1F4CC;</button>';
   h += '<div class="board-card-key">' + esc(item.id) + '</div>';
@@ -25034,6 +25127,12 @@ function _renderBoardCard(item) {
   h += esc(item.title) + '</div>';
   if (firstLine) h += '<div class="board-card-desc">' + esc(firstLine) + ((item.desc || '').length > 80 ? '\u2026' : '') + '</div>';
   h += '<div class="board-card-footer">';
+  if (item.is_blocked) {
+    h += '<span class="board-card-blocked-badge">Blocked</span>';
+    (item.blocked_by || []).forEach(function(bid) {
+      h += '<a class="board-card-blocked-link" onclick="event.stopPropagation();openBoardDetail(\'' + esc(bid) + '\')">' + esc(bid) + '</a>';
+    });
+  }
   if (boardViewMode !== 'session' && item.session) h += '<span class="board-card-session" data-session="' + esc(item.session) + '">' + esc(item.session) + '</span>';
   tags.forEach(function(t) { h += '<span class="board-card-tag" data-tag="' + esc(t) + '">' + esc(t) + '</span>'; });
   if (item.due) { const today = new Date().toISOString().slice(0,10); const overdue = item.due < today && item.status !== 'done'; h += '<span class="board-card-time" style="' + (overdue ? 'color:var(--red)' : 'color:var(--accent)') + '">&#x1F4C5; ' + item.due + '</span>'; }
@@ -25617,6 +25716,7 @@ async function saveBoardEdit() {
 // ── Board detail (full-screen) ──
 let boardDetailId = null;
 let boardDetailStatus = 'todo';
+let boardDetailBlockedBy = [];
 const _boardDrafts = {};  // item id → { title, desc, session, status, due }
 
 function openBoardDetail(id) {
@@ -25642,6 +25742,9 @@ function openBoardDetail(id) {
   _tagState['bd'] = [...(item.tags || [])];
   _beTagRenderChips('bd');
   _beTagInputUpdate('bd');
+  // Blocked by chips
+  boardDetailBlockedBy = draft ? (draft.blocked_by || [...(item.blocked_by || [])]) : [...(item.blocked_by || [])];
+  _bdRenderBlockedChips();
   const meta = document.getElementById('bd-meta');
   const parts = [];
   if (item.creator) parts.push('From ' + esc(item.creator));
@@ -25671,6 +25774,66 @@ function boardDetailTab(tab) {
     desc.style.display = '';
     preview.style.display = 'none';
   }
+}
+
+function _bdRenderBlockedChips() {
+  const wrap = document.getElementById('bd-blocked-wrap');
+  if (!wrap) return;
+  wrap.innerHTML = '';
+  (boardDetailBlockedBy || []).forEach(function(bid) {
+    const blocker = boardItems.find(i => i.id === bid);
+    const label = bid + (blocker ? ' ' + (blocker.title || '').slice(0, 20) : '');
+    wrap.innerHTML += '<span class="bd-blocked-chip" title="' + esc(label) + '" onclick="closeBoardDetail();openBoardDetail(\'' + esc(bid) + '\')">' + esc(bid) + '<span class="bd-blocked-chip-x" onclick="event.stopPropagation();_bdRemoveBlocked(\'' + esc(bid) + '\')">\u00d7</span></span>';
+  });
+}
+
+function _bdBlockedUpdate() {
+  const input = document.getElementById('bd-blocked-input');
+  const sug = document.getElementById('bd-blocked-suggestions');
+  if (!input || !sug) return;
+  const q = input.value.trim().toLowerCase();
+  if (!q) { sug.innerHTML = ''; sug.style.display = 'none'; return; }
+  const matches = boardItems.filter(i =>
+    i.id !== boardDetailId &&
+    !boardDetailBlockedBy.includes(i.id) &&
+    (i.id.toLowerCase().includes(q) || (i.title || '').toLowerCase().includes(q))
+  ).slice(0, 5);
+  if (!matches.length) { sug.innerHTML = '<div class="be-tag-suggestion" style="color:var(--dim)">No matches</div>'; sug.style.display = 'block'; return; }
+  sug.innerHTML = matches.map(i =>
+    '<div class="be-tag-suggestion" onclick="_bdAddBlocked(\'' + esc(i.id) + '\')">' +
+    esc(i.id) + ' <span style="color:var(--dim);font-size:0.72rem">' + esc((i.title || '').slice(0, 40)) + '</span></div>'
+  ).join('');
+  sug.style.display = 'block';
+}
+
+function _bdBlockedKeydown(event) {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    const sug = document.getElementById('bd-blocked-suggestions');
+    if (sug && sug.style.display !== 'none') {
+      const first = sug.querySelector('.be-tag-suggestion');
+      if (first && first.onclick) first.onclick();
+    }
+  } else if (event.key === 'Escape') {
+    document.getElementById('bd-blocked-input').value = '';
+    document.getElementById('bd-blocked-suggestions').style.display = 'none';
+  }
+}
+
+function _bdAddBlocked(bid) {
+  if (!boardDetailBlockedBy.includes(bid)) {
+    boardDetailBlockedBy.push(bid);
+    _bdRenderBlockedChips();
+  }
+  const input = document.getElementById('bd-blocked-input');
+  if (input) input.value = '';
+  const sug = document.getElementById('bd-blocked-suggestions');
+  if (sug) sug.style.display = 'none';
+}
+
+function _bdRemoveBlocked(bid) {
+  boardDetailBlockedBy = boardDetailBlockedBy.filter(b => b !== bid);
+  _bdRenderBlockedChips();
 }
 
 function _renderDetailStatusBtns() {
@@ -25703,7 +25866,7 @@ function closeBoardDetail() {
       const due_time = dueTimeEl2 ? dueTimeEl2.value : (item.due_time || '');
       // Only save draft if something actually differs from saved state
       if (t !== (item.title || '') || d !== (item.desc || '') || s !== (item.session || '') || st !== (item.status || 'todo') || due !== (item.due || '') || due_time !== (item.due_time || '')) {
-        _boardDrafts[boardDetailId] = { title: t, desc: d, session: s, status: st, due, due_time };
+        _boardDrafts[boardDetailId] = { title: t, desc: d, session: s, status: st, due, due_time, blocked_by: [...boardDetailBlockedBy] };
       } else {
         delete _boardDrafts[boardDetailId];
       }
@@ -25758,7 +25921,7 @@ async function boardDetailSave() {
   document.getElementById('bd-save-status').textContent = 'Saving...';
   const dueInput = document.getElementById('bd-due');
   const dueTimeInput = document.getElementById('bd-due-time');
-  const changes = { title, desc, status: boardDetailStatus, due: dueInput ? dueInput.value : '', due_time: dueTimeInput ? dueTimeInput.value : '', tags: [..._tagState['bd']] };
+  const changes = { title, desc, status: boardDetailStatus, due: dueInput ? dueInput.value : '', due_time: dueTimeInput ? dueTimeInput.value : '', tags: [..._tagState['bd']], blocked_by: boardDetailBlockedBy || [] };
   if (session !== undefined) changes.session = session;
   await updateBoardItem(boardDetailId, changes);
   delete _boardDrafts[boardDetailId];
@@ -35099,6 +35262,22 @@ class CCHandler(BaseHTTPRequestHandler):
                 creator = body.get("creator", "")
                 desc = body.get("desc", "").strip()
                 tags = [t for t in body.get("tags", []) if t]
+                # Parse and sanitize blocked_by
+                blocked_by_raw = body.get("blocked_by", [])
+                if not isinstance(blocked_by_raw, list):
+                    blocked_by_raw = []
+                blocked_by_list = []
+                seen = set()
+                for b in blocked_by_raw:
+                    b = str(b).strip()
+                    if b and b not in seen:
+                        seen.add(b)
+                        blocked_by_list.append(b)
+                for b_id in blocked_by_list:
+                    exists = db.execute("SELECT 1 FROM issues WHERE id = ? AND deleted IS NULL", (b_id,)).fetchone()
+                    if not exists:
+                        return self._json({"error": f"blocked_by contains non-existent issue: {b_id}"}, 400)
+                blocked_by_db = ",".join(blocked_by_list)
                 owner_type = body.get("owner_type", "agent" if session else "human")
                 if owner_type not in ("human", "agent"):
                     owner_type = "human"
@@ -35109,9 +35288,9 @@ class CCHandler(BaseHTTPRequestHandler):
                 ).fetchone()
                 new_pos = (min_pos_row["m"] if min_pos_row else 0) - 1024.0
                 db.execute(
-                    """INSERT INTO issues (id, title, desc, status, session, creator, due, due_time, created, updated, owner_type, pos)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (item_id, title, desc, status, session or None, creator, due, due_time, now, now, owner_type, new_pos),
+                    """INSERT INTO issues (id, title, desc, status, session, creator, due, due_time, created, updated, owner_type, pos, blocked_by)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (item_id, title, desc, status, session or None, creator, due, due_time, now, now, owner_type, new_pos, blocked_by_db),
                 )
                 for tag in tags:
                     db.execute(
@@ -35248,6 +35427,11 @@ class CCHandler(BaseHTTPRequestHandler):
                     return self._json({"error": "item is not an agent task"}, 409)
                 if dict(row)["status"] not in ("todo", "backlog"):
                     return self._json({"error": f"item not available (status: {dict(row)['status']})"}, 409)
+                # Block check: reject if blocked by incomplete tasks
+                item = _item_by_id(bid)
+                if item and item.get("is_blocked"):
+                    blocking_ids = [b for b in item.get("blocked_by", [])]
+                    return self._json({"error": f"item is blocked by incomplete tasks: {','.join(blocking_ids)}"}, 409)
                 now = int(time.time())
                 # Atomic claim: only succeeds if still todo/backlog AND agent-owned
                 # The owner_type check in the WHERE prevents TOCTOU races where
@@ -35305,7 +35489,29 @@ class CCHandler(BaseHTTPRequestHandler):
                                     "dirty_files": dirty[:20],
                                 }, 409)
                     set_clauses, params = [], []
-                    for k in ("title", "desc", "status", "session", "due", "due_time", "owner_type", "pinned", "pos"):
+                    # Handle blocked_by with validation
+                    if "blocked_by" in body:
+                        bb_raw = body.get("blocked_by")
+                        if not isinstance(bb_raw, list):
+                            bb_raw = []
+                        bb_list = []
+                        seen = set()
+                        for b in bb_raw:
+                            b = str(b).strip()
+                            if b and b not in seen:
+                                seen.add(b)
+                                bb_list.append(b)
+                        if bid in bb_list:
+                            return self._json({"error": "self-dependency not allowed"}, 400)
+                        for b_id in bb_list:
+                            ex = db.execute("SELECT 1 FROM issues WHERE id = ? AND deleted IS NULL", (b_id,)).fetchone()
+                            if not ex:
+                                return self._json({"error": f"blocked_by contains non-existent issue: {b_id}"}, 400)
+                        cycle_found = _check_blocked_by_cycle(db, bid, bb_list)
+                        if cycle_found:
+                            return self._json({"error": "circular dependency detected"}, 400)
+                        body["blocked_by"] = ",".join(bb_list) if bb_list else ""
+                    for k in ("title", "desc", "status", "session", "due", "due_time", "owner_type", "pinned", "pos", "blocked_by"):
                         if k in body:
                             set_clauses.append(f"{k} = ?")
                             v = body[k]
