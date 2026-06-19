@@ -9394,17 +9394,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   .overlay-header h2 { font-size: 1.1rem; }
   .overlay-body {
-    flex: 1; min-height: 0; overflow-x: auto; overflow-y: auto;
+    flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto;
     background: #010409; border-radius: 8px;
     padding: 10px; font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
-    font-size: 0.78rem; line-height: 1.4; white-space: pre;
+    font-size: 0.78rem; line-height: 1.4; white-space: pre-wrap; word-break: break-word;
     -webkit-overflow-scrolling: touch;
     -webkit-user-select: text; user-select: text;
     -webkit-touch-callout: default; cursor: text;
-    touch-action: pan-y pan-x;
-  }
-  @media (max-width: 768px) {
-    .overlay-body { white-space: pre-wrap; word-break: break-word; overflow-x: hidden; touch-action: pan-y; }
+    touch-action: pan-y;
   }
   .peek-copy-btn {
     position: absolute; top: 6px; right: 6px; z-index: 10;
