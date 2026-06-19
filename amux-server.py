@@ -12409,6 +12409,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     .sched-action-btn { min-height: 44px; font-size: 0.82rem; padding: 0 12px; width: 100%; }
     #scheduler-view > div:first-child button.btn { min-height: 44px; font-size: 0.82rem; }
     .sched-toggle-label { min-width: 44px; min-height: 44px; }
+    /* On mobile: pin to top, let box scroll, cap textarea height */
+    #sched-overlay { align-items: flex-start; padding: 8px; }
+    #sched-overlay .board-edit-box { height: auto !important; max-height: calc(100dvh - 16px); overflow-y: auto !important; overflow-x: hidden; display: block !important; }
+    #sched-overlay #sched-command { min-height: 80px !important; max-height: 140px; resize: none; }
+    .sched-modal-footer { max-height: none; }
   }
   @media (max-width: 600px) {
     #journal-view { height: calc(100dvh - 122px - var(--chrome-tab-h, 0px)); position: relative; }
@@ -13461,7 +13466,7 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
       <div id="sched-command-preview" class="md-content" style="display:none;flex:1;padding:10px 12px;background:var(--card);border:1px solid var(--border);border-radius:6px;overflow-y:auto;font-size:0.88rem;line-height:1.65;color:var(--text);min-height:0;"></div>
     </div>
     <!-- Footer: schedule + advanced + buttons (scrollable) -->
-    <div style="flex-shrink:0;border-top:1px solid var(--border);overflow-y:auto;max-height:260px;padding:10px 16px 14px;">
+    <div class="sched-modal-footer" style="flex-shrink:0;border-top:1px solid var(--border);overflow-y:auto;max-height:260px;padding:10px 16px 14px;">
       <div style="display:flex;gap:12px;margin-bottom:8px;">
         <div style="flex:1;">
           <label class="field-label">Schedule</label>
@@ -22844,6 +22849,10 @@ document.addEventListener('keydown', (e) => {
         if (target) { e.preventDefault(); gpDoKeys(target, 'C-c'); return; }
       }
     }
+    return;
+  }
+  if (document.getElementById('sched-overlay').classList.contains('active')) {
+    if (e.key === 'Escape') { e.preventDefault(); closeSchedModal(); return; }
     return;
   }
   if (document.getElementById('board-detail-overlay').classList.contains('active')) {
