@@ -9285,6 +9285,22 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .sched-toggle-label { display:flex;align-items:center;cursor:pointer;flex-shrink:0;margin-top:1px;min-width:44px;min-height:44px;justify-content:center; }
   .sched-actions { display:flex;gap:6px;margin-top:8px;flex-wrap:wrap; }
   .sched-action-btn { font-size:0.72rem;padding:4px 12px; }
+  .sched-group { margin-bottom:10px; }
+  .sched-group-header { display:flex;align-items:center;gap:6px;font-size:0.68rem;font-weight:700;color:var(--dim);text-transform:uppercase;letter-spacing:0.06em;padding:4px 0 5px;border-bottom:1px solid var(--border);margin-bottom:6px; }
+  .sched-group-count { background:var(--card);border:1px solid var(--border);border-radius:10px;padding:1px 6px;font-size:0.63rem;color:var(--dim); }
+  .sched-cadence-pill { font-size:0.62rem;padding:1px 5px;border-radius:10px;border:1px solid var(--border);color:var(--dim);background:var(--card);font-family:monospace; }
+  .sched-run-dot { display:inline-block;width:7px;height:7px;border-radius:50%;flex-shrink:0; }
+  .sched-run-dot.ok { background:var(--green,#4ade80); }
+  .sched-run-dot.done { background:var(--accent); }
+  .sched-run-dot.err { background:var(--red,#f87171); }
+  .sched-cmd-expand { margin-top:8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 10px;max-height:180px;overflow-y:auto; }
+  .sched-cmd-expand pre { margin:0;font-size:0.7rem;line-height:1.5;white-space:pre-wrap;word-break:break-word;color:var(--text);font-family:monospace; }
+  .sched-sess-dot { display:inline-block;width:6px;height:6px;border-radius:50%;flex-shrink:0;background:var(--dim); }
+  .sched-sess-dot.active { background:var(--green,#4ade80); }
+  .sched-disabled-details summary { cursor:pointer;font-size:0.72rem;font-weight:600;color:var(--dim);padding:6px 0 4px;list-style:none;display:flex;align-items:center;gap:5px;border-top:1px solid var(--border);margin-top:4px; }
+  .sched-disabled-details summary::-webkit-details-marker { display:none; }
+  .sched-disabled-details[open] summary .sched-disabled-arrow { transform:rotate(90deg); }
+  .sched-disabled-arrow { display:inline-block;font-size:0.6rem;transition:transform 0.15s;color:var(--dim); }
   .badge.auto-continue { background: rgba(98,160,234,0.2); color: #62a0ea; }
   .badge.model { background: rgba(57,210,192,0.2); color: var(--cyan); }
   .badge.provider { cursor: pointer; }
@@ -12777,16 +12793,18 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
 </div>
 <!-- Scheduler view -->
 <div id="scheduler-view" style="display:none;">
-  <div style="padding:10px 12px 6px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border);">
+  <div style="padding:10px 12px 8px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border);">
     <span style="font-weight:600;font-size:0.9rem;">Scheduler</span>
-    <div style="flex:1;"></div>
-    <button class="btn" onclick="openSchedModal()" style="font-size:0.78rem;padding:4px 10px;">+ New Schedule</button>
+    <span id="sched-stats" style="font-size:0.7rem;color:var(--dim);flex:1;"></span>
+    <button class="btn" onclick="openSchedModal()" style="font-size:0.78rem;padding:4px 10px;">+ New</button>
   </div>
-  <div id="scheduler-list" style="padding:10px 12px;display:flex;flex-direction:column;gap:8px;overflow-y:auto;"></div>
-  <div style="padding:0 12px 12px;">
-    <div style="font-size:0.78rem;font-weight:600;color:var(--dim);padding:8px 0 4px;border-top:1px solid var(--border);">Recent Runs</div>
+  <div id="scheduler-list" style="padding:10px 12px;display:flex;flex-direction:column;gap:6px;overflow-y:auto;"></div>
+  <details id="sched-runs-details" style="border-top:1px solid var(--border);padding:0 12px 10px;">
+    <summary style="cursor:pointer;font-size:0.78rem;font-weight:600;color:var(--dim);padding:8px 0 4px;list-style:none;display:flex;align-items:center;gap:5px;">
+      <span style="font-size:0.6rem;transition:transform 0.15s;display:inline-block;" id="sched-runs-arrow">▶</span> Recent Runs
+    </summary>
     <div id="scheduler-runs"></div>
-  </div>
+  </details>
 </div>
 
 <div id="files-view" style="display:none;flex-direction:column;flex:1;min-height:0;">
@@ -24559,47 +24577,125 @@ async function fetchSchedulerRuns() {
   }
 }
 
+// ── Scheduler helpers ──────────────────────────────────────────────────────
+function relTime(val) {
+  if (!val) return '—';
+  let ms;
+  if (typeof val === 'string') ms = new Date(val).getTime();
+  else ms = val > 2e9 ? val : val * 1000;
+  if (isNaN(ms)) return '—';
+  const diff = ms - Date.now();
+  const abs = Math.abs(diff);
+  const m = Math.floor(abs / 60000);
+  const h = Math.floor(m / 60);
+  const d = Math.floor(h / 24);
+  let label;
+  if (d >= 2) label = `${d}d`;
+  else if (d >= 1) label = `1d ${h % 24 > 0 ? (h % 24) + 'h' : ''}`.trim();
+  else if (h >= 1) label = `${h}h${m % 60 > 0 ? ' ' + (m % 60) + 'm' : ''}`;
+  else if (m >= 1) label = `${m}m`;
+  else label = '<1m';
+  return diff > 0 ? `in ${label}` : `${label} ago`;
+}
+
+function isLoopCadence(s) {
+  const expr = (s.schedule_expr || s.recurrence || '').toLowerCase();
+  return /every\s+\d+m/.test(expr) || /every\s+[12]h/.test(expr) || expr === 'hourly';
+}
+
+function schedCadence(s) {
+  if (isLoopCadence(s)) return 'loop';
+  const expr = (s.schedule_expr || '').toLowerCase();
+  if (/weekly|monthly|every\s+(mon|tue|wed|thu|fri|sat|sun)/.test(expr)) return 'weekly';
+  return 'routine';
+}
+
+function toggleSchedExpand(id) {
+  const el = document.getElementById('sched-cmd-' + id);
+  if (!el) return;
+  const showing = el.style.display !== 'none';
+  el.style.display = showing ? 'none' : 'block';
+  const btn = document.getElementById('sched-view-btn-' + id);
+  if (btn) btn.textContent = showing ? 'View' : 'Hide';
+}
+
 function renderScheduler() {
   const listEl = document.getElementById('scheduler-list');
   const runsEl = document.getElementById('scheduler-runs');
   if (!listEl || !runsEl) return;
 
-  // ── Schedule list ─────────────────────────────────────────────────────────
+  // Build run history map: schedule_id → last N run records
+  const runMap = {};
+  for (const r of _schedulerRuns) {
+    if (!runMap[r.schedule_id]) runMap[r.schedule_id] = [];
+    if (runMap[r.schedule_id].length < 6) runMap[r.schedule_id].push(r);
+  }
+
+  // Session status map
+  const sessMap = {};
+  for (const s of sessions) sessMap[s.name] = s.status || 'idle';
+
+  // Stats
+  const dayAgo = (Date.now() / 1000) - 86400;
+  const runsToday = _schedulerRuns.filter(r => r.ran_at > dayAgo).length;
+  const activeCount = schedules.filter(s => s.enabled).length;
+  const loopCount = schedules.filter(s => s.enabled && isLoopCadence(s)).length;
+  const statsEl = document.getElementById('sched-stats');
+  if (statsEl) {
+    statsEl.innerHTML = `<strong>${activeCount}</strong> active &nbsp;&middot;&nbsp; <strong>${loopCount}</strong> looping &nbsp;&middot;&nbsp; <strong>${runsToday}</strong> runs today`;
+  }
+
   if (!schedules.length) {
     listEl.innerHTML = `<div style="text-align:center;padding:40px 0;color:var(--dim);">
-      <div style="font-size:2rem;margin-bottom:10px;">⏰</div>
+      <div style="font-size:2rem;margin-bottom:10px;">&#x23F0;</div>
       <div style="font-weight:600;font-size:0.9rem;margin-bottom:6px;color:var(--text);">No schedules yet</div>
       <div style="font-size:0.82rem;">Create a schedule to run commands in sessions on a recurring timer.</div>
     </div>`;
   } else {
-    listEl.innerHTML = schedules.map(s => {
-      const nextRun = s.next_run ? s.next_run.replace('T', ' ') : '—';
-      const lastRun = s.last_run ? s.last_run.replace('T', ' ') : 'never';
+    const renderCard = (s) => {
       const recLabel = s.schedule_expr || (s.sched_type === 'once' ? 'once' : (s.recurrence || 'recurring'));
-      const dimmed = !s.enabled ? 'opacity:0.5;' : '';
-      return `<div class="card sched-item" style="padding:10px 12px;${dimmed}">
-        <div style="display:flex;align-items:flex-start;gap:10px;">
-          <label class="sched-toggle-label">
+      const runs = runMap[s.id] || [];
+      const dots = runs.map(r => {
+        const cls = r.status === 'ok' ? 'ok' : r.status === 'done' ? 'done' : 'err';
+        const title = esc(r.status + ' · ' + new Date(r.ran_at * 1000).toLocaleTimeString());
+        return `<span class="sched-run-dot ${cls}" title="${title}"></span>`;
+      }).join('');
+      const sessStatus = sessMap[s.session] || 'idle';
+      const sessLink = s.session
+        ? `<span class="sched-sess-dot ${sessStatus}" title="${s.session}: ${sessStatus}"></span><span style="color:var(--accent);cursor:pointer;" onclick="switchView('sessions');openPeek('${esc(s.session)}')">${esc(s.session)}</span>`
+        : `<span style="color:var(--dim);">(shell)</span>`;
+      const nextRel = s.next_run ? `▶ <strong style="color:var(--text);" title="${s.next_run}">${relTime(s.next_run)}</strong>` : '';
+      const lastRel = s.last_run ? `<span style="color:var(--dim);" title="${s.last_run}">&#x2713; ${relTime(s.last_run)}</span>` : `<span style="color:var(--dim);">never</span>`;
+      const trigLabel = s.trigger_on ? `&nbsp;&middot;&nbsp;<span style="color:var(--accent);font-size:0.65rem;">&#x26A1; ${esc((s.trigger_on||'').split(',').map(t=>t==='session_idle'?'idle':t==='board'?'board':t).join('+')).trim()}</span>` : '';
+      const watchLabel = s.watch ? `&nbsp;&middot;&nbsp;<span style="color:var(--dim);font-size:0.65rem;">&#x1F441; watch</span>` : '';
+      const doneLabel = s.done_pattern ? `&nbsp;&middot;&nbsp;<span style="color:var(--dim);font-size:0.65rem;">stop: <code style="font-size:0.6rem;">${esc(s.done_pattern.length > 20 ? s.done_pattern.slice(0,20)+'…' : s.done_pattern)}</code></span>` : '';
+      return `<div class="card sched-item" style="padding:9px 12px;">
+        <div style="display:flex;align-items:flex-start;gap:8px;">
+          <label class="sched-toggle-label" title="${s.enabled ? 'Disable' : 'Enable'}">
             <input type="checkbox" ${s.enabled ? 'checked' : ''}
               onchange="toggleSchedEnabled('${esc(s.id)}', this.checked)"
               style="width:auto;accent-color:var(--accent);">
           </label>
           <div style="flex:1;min-width:0;">
-            <div style="font-weight:600;font-size:0.85rem;">${esc(s.title)} <span style="font-weight:400;font-size:0.68rem;color:var(--dim);user-select:all;">${esc(s.id)}</span></div>
-            <div style="font-size:0.72rem;color:var(--dim);margin-top:2px;">
-              <span style="color:var(--accent);">${esc(s.session)}</span>
-              &nbsp;·&nbsp;<code style="font-size:0.7rem;background:var(--card);border:1px solid var(--border);border-radius:3px;padding:0 3px;">${esc(s.command.length > 60 ? s.command.slice(0,60) + '…' : s.command)}</code>
+            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:4px;">
+              <span style="font-weight:600;font-size:0.84rem;cursor:pointer;" onclick="toggleSchedExpand('${esc(s.id)}')">${esc(s.title)}</span>
+              <code class="sched-cadence-pill">${esc(recLabel)}</code>
+              ${trigLabel}${watchLabel}${doneLabel}
+              <span style="font-size:0.63rem;color:var(--dim);user-select:all;margin-left:auto;">${esc(s.id)}</span>
             </div>
-            <div style="font-size:0.7rem;color:var(--dim);margin-top:5px;display:flex;gap:10px;flex-wrap:wrap;">
-              <span>🔁 ${esc(recLabel)}</span>
-              <span>▶ next: <strong style="color:var(--text);">${esc(nextRun)}</strong></span>
-              <span>✓ last: ${esc(lastRun)}</span>
-              <span>runs: <strong>${s.run_count || 0}</strong></span>
-              ${s.watch ? `<span style="color:var(--accent);">👁 watching</span>` : ''}
-              ${s.done_pattern ? `<span style="color:var(--dim);">stop: <code style="font-size:0.65rem;">${esc(s.done_pattern)}</code></span>` : ''}
-              ${s.trigger_on ? `<span style="color:var(--accent);" title="Event-triggered (cooldown ${s.trigger_cooldown||120}s)">⚡ ${esc((s.trigger_on||'').split(',').map(t=>t==='session_idle'?'on idle':t==='board'?'on board':t).join(' + '))}</span>` : ''}
+            <div style="font-size:0.72rem;display:flex;align-items:center;gap:8px;flex-wrap:wrap;color:var(--dim);">
+              <span style="display:flex;align-items:center;gap:3px;">${sessLink}</span>
+              ${nextRel ? `<span>${nextRel}</span>` : ''}
+              ${lastRel}
+              <span title="Total runs">&#xD7;${s.run_count || 0}</span>
+              ${dots ? `<span style="display:flex;align-items:center;gap:2px;" title="Recent runs (newest first)">${dots}</span>` : ''}
+            </div>
+            <div class="sched-cmd-expand" id="sched-cmd-${esc(s.id)}" style="display:none;">
+              <pre>${esc(s.command)}</pre>
             </div>
             <div class="sched-actions">
+              <button class="btn sched-action-btn" id="sched-view-btn-${esc(s.id)}"
+                onclick="toggleSchedExpand('${esc(s.id)}')">View</button>
               <button class="btn sched-action-btn"
                 onclick="runScheduleNow('${esc(s.id)}')">Run Now</button>
               <button class="btn sched-action-btn"
@@ -24610,19 +24706,91 @@ function renderScheduler() {
           </div>
         </div>
       </div>`;
-    }).join('');
+    };
+
+    const renderDisabledCard = (s) => {
+      const recLabel = s.schedule_expr || (s.sched_type === 'once' ? 'once' : (s.recurrence || 'recurring'));
+      const runs = runMap[s.id] || [];
+      const dots = runs.map(r => `<span class="sched-run-dot ${r.status === 'ok' ? 'ok' : 'err'}" title="${esc(r.status)}"></span>`).join('');
+      return `<div class="card sched-item" style="padding:8px 12px;">
+        <div style="display:flex;align-items:flex-start;gap:8px;">
+          <label class="sched-toggle-label" title="Enable">
+            <input type="checkbox" onchange="toggleSchedEnabled('${esc(s.id)}', this.checked)"
+              style="width:auto;accent-color:var(--accent);">
+          </label>
+          <div style="flex:1;min-width:0;">
+            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:3px;">
+              <span style="font-weight:600;font-size:0.82rem;">${esc(s.title)}</span>
+              <code class="sched-cadence-pill">${esc(recLabel)}</code>
+            </div>
+            <div style="font-size:0.7rem;color:var(--dim);display:flex;align-items:center;gap:6px;">
+              ${s.session ? `<span style="color:var(--accent);">${esc(s.session)}</span>` : ''}
+              <span>&#xD7;${s.run_count || 0}</span>
+              ${dots ? `<span style="display:flex;align-items:center;gap:2px;">${dots}</span>` : ''}
+            </div>
+            <div class="sched-actions">
+              <button class="btn sched-action-btn" onclick="openSchedModal('${esc(s.id)}')">Edit</button>
+              <button class="btn sched-action-btn" style="color:var(--red);" onclick="deleteSchedule('${esc(s.id)}')">Delete</button>
+            </div>
+          </div>
+        </div>
+      </div>`;
+    };
+
+    // Group active schedules
+    const groups = [
+      { key: 'loop', label: 'Active Loops', emoji: '&#x21BB;', items: [] },
+      { key: 'routine', label: 'Daily Routines', emoji: '&#x2600;', items: [] },
+      { key: 'weekly', label: 'Weekly &amp; Less', emoji: '&#x1F4C5;', items: [] },
+    ];
+    const disabled = [];
+    for (const s of schedules) {
+      if (!s.enabled) { disabled.push(s); continue; }
+      const cad = schedCadence(s);
+      const g = groups.find(g => g.key === cad) || groups[1];
+      g.items.push(s);
+    }
+
+    const renderGroup = ({ label, emoji, items }) => {
+      if (!items.length) return '';
+      return `<div class="sched-group">
+        <div class="sched-group-header">${emoji} ${label} <span class="sched-group-count">${items.length}</span></div>
+        <div style="display:flex;flex-direction:column;gap:6px;">${items.map(renderCard).join('')}</div>
+      </div>`;
+    };
+
+    let html = groups.map(renderGroup).join('');
+
+    if (disabled.length) {
+      html += `<details class="sched-disabled-details">
+        <summary><span class="sched-disabled-arrow">&#x25B6;</span> Inactive <span class="sched-group-count">${disabled.length}</span></summary>
+        <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;opacity:0.6;">
+          ${disabled.map(renderDisabledCard).join('')}
+        </div>
+      </details>`;
+    }
+
+    listEl.innerHTML = html;
   }
 
-  // ── Recent runs ───────────────────────────────────────────────────────────
+  // ── Recent runs (collapsible) ─────────────────────────────────────────────
+  const det = document.getElementById('sched-runs-details');
+  const arrow = document.getElementById('sched-runs-arrow');
+  if (det && arrow) {
+    det.addEventListener('toggle', () => {
+      arrow.style.transform = det.open ? 'rotate(90deg)' : '';
+    }, { once: true });
+  }
   if (!_schedulerRuns.length) {
     runsEl.innerHTML = `<div style="color:var(--dim);font-size:0.78rem;padding:4px 0;">No runs recorded yet.</div>`;
   } else {
     runsEl.innerHTML = _schedulerRuns.slice(0, 30).map(r => {
-      const ts = r.ran_at ? new Date(r.ran_at * 1000).toLocaleString() : '?';
-      const okColor = r.status === 'ok' ? 'var(--green,#4ade80)' : 'var(--red)';
+      const timeStr = r.ran_at ? relTime(r.ran_at) : '?';
+      const fullDate = r.ran_at ? new Date(r.ran_at * 1000).toLocaleString() : '';
+      const okColor = r.status === 'ok' ? 'var(--green,#4ade80)' : r.status === 'done' ? 'var(--accent)' : 'var(--red)';
       return `<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--border);font-size:0.75rem;min-width:0;">
         <span style="color:${okColor};font-weight:600;min-width:28px;flex-shrink:0;">${esc(r.status)}</span>
-        <span style="color:var(--dim);white-space:nowrap;flex-shrink:0;">${esc(ts)}</span>
+        <span style="color:var(--dim);white-space:nowrap;flex-shrink:0;" title="${esc(fullDate)}">${esc(timeStr)}</span>
         <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;">${esc(r.title || r.schedule_id)}</span>
         ${r.note ? `<span style="color:var(--red);max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0;" title="${esc(r.note)}">${esc(r.note)}</span>` : ''}
       </div>`;
