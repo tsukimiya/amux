@@ -7346,6 +7346,7 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                 # New tmux session -- start bash shell (not Claude directly)
                 subprocess.run(
                     ["tmux", "new-session", "-d", "-s", tmux_sess, "-n", name, "-c", work_dir,
+                     "-x", "220", "-y", "50",
                      "-e", "TMUX_SESSION_NAME=" + name,
                      "-e", "AMUX_SESSION=" + name,
                      "-e", ("AMUX_URL=http" if "--no-tls" in sys.argv else "AMUX_URL=https") + "://localhost:8822",
