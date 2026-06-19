@@ -26025,6 +26025,9 @@ function _renderGridChips() {
   }).join('');
 }
 
+function wsExpandActive() {
+  (sessions || []).filter(s => s.running && s.status !== 'idle').forEach(s => addGridPane(s.name));
+}
 function toggleGridPane(name) {
   if (_gridPanes[name]) removeGridPane(name);
   else addGridPane(name);
@@ -32674,6 +32677,7 @@ window.addEventListener('load', _pinnedNotesRefresh);
         <button onclick="wsApplyPreset('rows')"><span class="preset-icon">&#x2261;</span> Stacked Rows</button>
       </div>
     </div>
+    <button class="btn" onclick="wsExpandActive()" style="flex-shrink:0;font-size:0.75rem;padding:4px 10px;" title="Add all active/waiting sessions">&#x26A1; Active</button>
     <button class="btn" onclick="wsClearWorkspace()" style="flex-shrink:0;font-size:0.75rem;padding:4px 10px;color:var(--dim);" title="Remove all panes">Clear</button>
     <button class="btn" id="ws-fullscreen-btn" onclick="wsToggleFullscreen()" style="flex-shrink:0;font-size:0.75rem;padding:4px 10px;" title="Toggle fullscreen">&#x26F6;</button>
     <button class="btn" onclick="exitGridMode()" style="flex-shrink:0;font-size:0.75rem;padding:4px 10px;">&#x2715; Exit</button>
