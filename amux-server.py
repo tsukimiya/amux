@@ -27309,23 +27309,104 @@ function _skillsRender(q, countEl, container) {
       '<div style="display:flex;flex-direction:column;gap:6px;">' + items.map(renderFn).join('') + '</div>' +
     '</div>';
 
-  const card = (cmd, desc, hint, editable) =>
-    '<div class="skill-card" style="cursor:' + (editable ? 'pointer' : 'default') + ';" ' +
-      (editable ? 'onclick="editSkill(\'' + esc(cmd.replace(/^\//,'')) + '\')"' : '') + '>' +
+  const card = (cmd, desc, hint, editable, fetchKey) => {
+    const id = 'sc-' + cmd.replace(/[^a-z0-9]/gi,'_');
+    const safeCmd = cmd.replace(/'/g,"\\'");
+    const usage = hint ? cmd + ' ' + hint : cmd;
+    return '<div class="skill-card" id="' + id + '">' +
       '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">' +
-        '<span class="skill-card-name">' + esc(cmd) + '</span>' +
-        '<button class="btn" style="font-size:0.65rem;padding:2px 8px;flex-shrink:0;" onclick="event.stopPropagation();navigator.clipboard.writeText(\'' + esc(cmd) + '\');showToast(\'Copied!\')">Copy</button>' +
+        '<span class="skill-card-name" style="cursor:pointer;" onclick="_skillToggle(\'' + id + '\',\'' + esc(fetchKey || '') + '\')">' + esc(cmd) + '</span>' +
+        '<div style="display:flex;gap:4px;flex-shrink:0;">' +
+          (editable ? '<button class="btn" style="font-size:0.65rem;padding:2px 8px;" onclick="event.stopPropagation();editSkill(\'' + esc(cmd.replace(/^\//,'')) + '\')">Edit</button>' : '') +
+          '<button class="btn" style="font-size:0.65rem;padding:2px 8px;" onclick="event.stopPropagation();navigator.clipboard.writeText(\'' + esc(usage) + '\');showToast(\'Copied!\')">Copy</button>' +
+          '<button class="btn" style="font-size:0.65rem;padding:2px 6px;" onclick="_skillToggle(\'' + id + '\',\'' + esc(fetchKey || '') + '\')" title="Expand">▾</button>' +
+        '</div>' +
       '</div>' +
       (desc ? '<div class="skill-card-desc">' + esc(desc) + '</div>' : '') +
-      (hint ? '<div class="skill-card-hint">' + esc(hint) + '</div>' : '') +
+      (hint ? '<div class="skill-card-hint" style="font-family:monospace;font-size:0.75rem;color:var(--dim);">' + esc(cmd + ' ' + hint) + '</div>' : '') +
+      '<div class="skill-expand" id="' + id + '-body" style="display:none;margin-top:8px;"></div>' +
     '</div>';
+  };
 
   const html =
-    section('Custom skills', db, s => card('/' + s.name, s.description, s.hint, true)) +
-    section('Project commands (.claude/commands)', file, c => card(c.cmd, c.desc, c.hint || '', false)) +
-    section('Built-in', builtin, c => card(c.cmd, c.desc, '', false));
+    section('Custom skills', db, s => card('/' + s.name, s.description, s.hint, true, 'db:' + s.name)) +
+    section('Project commands (.claude/commands)', file, c => card(c.cmd, c.desc, c.hint || '', false, 'file:' + c.cmd.replace(/^\//,''))) +
+    section('Built-in', builtin, c => card(c.cmd, c.desc, '', false, ''));
 
   container.innerHTML = html || '<div style="color:var(--dim);font-size:0.85rem;padding:20px 0;">No skills match "' + esc(q) + '"</div>';
+}
+
+const _skillContentCache = {};
+async function _skillToggle(cardId, fetchKey) {
+  const body = document.getElementById(cardId + '-body');
+  const btn = document.querySelector('#' + cardId + ' .btn[title="Expand"]');
+  if (!body) return;
+  if (body.style.display !== 'none') {
+    body.style.display = 'none';
+    if (btn) btn.textContent = '▾';
+    return;
+  }
+  body.style.display = 'block';
+  if (btn) btn.textContent = '▴';
+  if (_skillContentCache[fetchKey]) { body.innerHTML = _skillContentCache[fetchKey]; return; }
+  if (!fetchKey) { body.innerHTML = '<span style="color:var(--dim);font-size:0.8rem;">No details available for built-in commands.</span>'; return; }
+  body.innerHTML = '<span style="color:var(--dim);font-size:0.8rem;">Loading...</span>';
+  try {
+    const [type, name] = fetchKey.split(':', 2);
+    const url = type === 'db' ? API + '/api/skills/' + encodeURIComponent(name) : API + '/api/slash-commands/' + encodeURIComponent(name);
+    const data = await fetch(url).then(r => r.json());
+    const content = data.content || '';
+    const html = _skillRenderContent(content);
+    _skillContentCache[fetchKey] = html;
+    body.innerHTML = html;
+  } catch(e) {
+    body.innerHTML = '<span style="color:var(--red);font-size:0.8rem;">Failed to load</span>';
+  }
+}
+
+function _skillRenderContent(raw) {
+  // Strip frontmatter
+  let body = raw;
+  if (body.startsWith('---')) {
+    const end = body.indexOf('---', 3);
+    if (end > 0) body = body.slice(end + 3).replace(/^\n/, '');
+  }
+  // Extract code blocks as copy-pasteable examples
+  const parts = [];
+  let last = 0;
+  const codeRe = /```(\w*)\n([\s\S]*?)```/g;
+  let m;
+  while ((m = codeRe.exec(body)) !== null) {
+    if (m.index > last) parts.push({type:'text', val: body.slice(last, m.index)});
+    parts.push({type:'code', lang: m[1], val: m[2].trim()});
+    last = m.index + m[0].length;
+  }
+  if (last < body.length) parts.push({type:'text', val: body.slice(last)});
+
+  let html = '<div style="font-size:0.8rem;color:var(--text);border-top:1px solid var(--border);padding-top:8px;">';
+  for (const p of parts) {
+    if (p.type === 'text') {
+      // Render basic markdown: headings, bold, bullets
+      let t = p.val
+        .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+        .replace(/^#{1,3} (.+)$/gm, '<div style="font-weight:700;margin:8px 0 4px;color:var(--text);">$1</div>')
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        .replace(/`([^`]+)`/g, '<code style="background:var(--border);padding:1px 4px;border-radius:3px;font-size:0.78rem;">$1</code>')
+        .replace(/^[-*] (.+)$/gm, '<div style="padding-left:12px;">• $1</div>')
+        .replace(/\n{2,}/g, '<div style="margin:4px 0;"></div>')
+        .replace(/\n/g, ' ');
+      html += '<div>' + t + '</div>';
+    } else {
+      const safeVal = p.val.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      const rawVal = p.val.replace(/'/g, "\\'").replace(/\n/g,'\\n');
+      html += '<div style="position:relative;margin:6px 0;">' +
+        '<pre style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 36px 8px 10px;font-size:0.75rem;overflow-x:auto;white-space:pre-wrap;word-break:break-all;margin:0;">' + safeVal + '</pre>' +
+        '<button onclick="navigator.clipboard.writeText(\'' + rawVal + '\');showToast(\'Copied!\')" style="position:absolute;top:4px;right:4px;background:var(--border);border:none;border-radius:4px;padding:2px 6px;font-size:0.65rem;cursor:pointer;color:var(--text);">Copy</button>' +
+      '</div>';
+    }
+  }
+  html += '</div>';
+  return html;
 }
 
 function _isBuiltinCmd(cmd) {
@@ -34264,6 +34345,22 @@ class CCHandler(BaseHTTPRequestHandler):
         if method == "GET" and path == "/api/slash-commands":
             cmds = _get_slash_commands()
             return self._json(cmds)
+
+        # GET /api/slash-commands/<name> — get full content of a file-based command
+        if method == "GET" and path.startswith("/api/slash-commands/"):
+            import pathlib as _p
+            name = path.split("/api/slash-commands/", 1)[1].lstrip("/")
+            if not name or "/" in name:
+                return self._json({"error": "invalid"}, 400)
+            for d in [_p.Path.home() / ".claude" / "commands", _p.Path(".") / ".claude" / "commands"]:
+                f = d / (name + ".md")
+                if f.exists():
+                    try:
+                        content = f.read_text()
+                        return self._json({"name": name, "content": content, "source": "file"})
+                    except Exception:
+                        pass
+            return self._json({"error": "not found"}, 404)
 
         # GET /api/skills/<name> — get full skill content
         if method == "GET" and path.startswith("/api/skills/"):
