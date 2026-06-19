@@ -58,11 +58,10 @@ Fill in the template with:
 - **State note slug**: `<slug>-state`
 - **Constraints note slug**: `<slug>-constraints`
 
-Save the filled note:
+Save the filled note by writing the JSON to a temp file first (avoids shell quoting issues with apostrophes in the goal):
 ```bash
-curl -sk -X POST -H 'Content-Type: application/json' \
-  -d "{\"content\": \"<filled content>\"}" \
-  $AMUX_URL/api/notes/<slug>
+python3 -c "import json; open('/tmp/orch-note.json','w').write(json.dumps({'content': FILLED_CONTENT}))"
+curl -sk -X POST -H 'Content-Type: application/json' -d @/tmp/orch-note.json $AMUX_URL/api/notes/<slug>
 ```
 
 ### 4. Create companion notes
