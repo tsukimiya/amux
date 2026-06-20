@@ -13488,10 +13488,10 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
 
 <!-- Schedule modal -->
 <div id="sched-overlay" class="board-edit-overlay" onclick="if(event.target===this)closeSchedModal()" style="display:none;">
-  <div class="board-edit-box" style="max-width:640px;width:100%;height:82dvh;padding:0;overflow:hidden;display:flex;flex-direction:column;">
+  <div class="board-edit-box" style="max-width:640px;width:100%;height:auto;max-height:92dvh;padding:0;overflow:hidden;display:flex;flex-direction:column;">
     <!-- Header: title, mode, session -->
-    <div style="padding:14px 16px 10px;flex-shrink:0;border-bottom:1px solid var(--border);">
-      <div style="font-weight:600;font-size:0.9rem;margin-bottom:10px;">&#x23F0; Scheduled Task</div>
+    <div style="padding:12px 16px 8px;flex-shrink:0;border-bottom:1px solid var(--border);">
+      <div style="font-weight:600;font-size:0.9rem;margin-bottom:8px;">&#x23F0; Scheduled Task</div>
       <div class="field-group" style="margin-bottom:8px;">
         <label class="field-label">Title</label>
         <input id="sched-title" type="text" placeholder="What should run?" autocomplete="off">
@@ -13514,8 +13514,8 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
         <select id="sched-kind" style="display:none;"><option value="tmux"></option><option value="shell"></option></select>
       </div>
     </div>
-    <!-- Command: fills remaining vertical space -->
-    <div style="flex:1;display:flex;flex-direction:column;padding:10px 16px;min-height:0;overflow:hidden;">
+    <!-- Command: fills remaining vertical space (min floor keeps it usable when the box is content-sized) -->
+    <div style="flex:1 1 auto;display:flex;flex-direction:column;padding:10px 16px;min-height:140px;overflow:hidden;">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;flex-shrink:0;">
         <label class="field-label" id="sched-command-label" style="margin-bottom:0;">Command</label>
         <div class="notes-mode-tabs" id="sched-command-tabs" style="margin:0;">
@@ -13530,7 +13530,7 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
       <div id="sched-command-preview" class="md-content" style="display:none;flex:1;padding:10px 12px;background:var(--card);border:1px solid var(--border);border-radius:6px;overflow-y:auto;font-size:0.88rem;line-height:1.65;color:var(--text);min-height:0;"></div>
     </div>
     <!-- Footer: mode-specific schedule panels + buttons (scrollable) -->
-    <div class="sched-modal-footer" style="flex-shrink:0;border-top:1px solid var(--border);overflow-y:auto;max-height:300px;padding:12px 16px 14px;">
+    <div class="sched-modal-footer" style="flex-shrink:1;min-height:0;border-top:1px solid var(--border);overflow-y:auto;max-height:300px;padding:12px 16px 14px;">
       <!-- LOOP -->
       <div id="sched-panel-loop" class="sched-panel" style="display:none;">
         <label class="field-label">Repeat every</label>
