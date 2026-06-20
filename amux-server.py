@@ -12812,6 +12812,13 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
     <span id="sched-stats" style="font-size:0.7rem;color:var(--dim);flex:1;"></span>
     <button class="btn" onclick="openSchedModal()" style="font-size:0.78rem;padding:4px 10px;">+ New</button>
   </div>
+  <div style="padding:8px 12px 0;">
+    <div class="search-wrap" id="sched-search-wrap" style="width:100%;">
+      <input class="search-input" id="sched-search" type="text" placeholder="Search schedules — title, session, command, cadence…" autocomplete="off"
+        oninput="schedSearchQuery=this.value;document.getElementById('sched-search-wrap').classList.toggle('has-value',!!this.value);renderScheduler()">
+      <button class="search-clear" onclick="document.getElementById('sched-search').value='';schedSearchQuery='';document.getElementById('sched-search-wrap').classList.remove('has-value');renderScheduler()">&#x2715;</button>
+    </div>
+  </div>
   <div id="scheduler-list" style="padding:10px 12px;display:flex;flex-direction:column;gap:6px;overflow-y:auto;"></div>
   <details id="sched-runs-details" style="border-top:1px solid var(--border);padding:0 12px 10px;">
     <summary style="cursor:pointer;font-size:0.78rem;font-weight:600;color:var(--dim);padding:8px 0 4px;list-style:none;display:flex;align-items:center;gap:5px;">
@@ -23276,6 +23283,7 @@ let _boardSortables = [];
 let _boardColSortable = null;
 let boardTimer = null;
 let schedules = [];
+let schedSearchQuery = '';
 let _schedEditId = null;
 let boardEditId = null;
 let boardEditStatus = 'todo';
@@ -24723,6 +24731,14 @@ function renderScheduler() {
       </div>`;
     };
 
+    // Apply search filter (title, session, command, cadence, id, trigger, stop pattern)
+    const q = schedSearchQuery.trim().toLowerCase();
+    const filtered = !q ? schedules : schedules.filter(s => {
+      const hay = [s.title, s.session, s.command, s.schedule_expr, s.recurrence, s.id,
+                   s.trigger_on, s.done_pattern].filter(Boolean).join(' ').toLowerCase();
+      return hay.includes(q);
+    });
+
     // Group active schedules
     const groups = [
       { key: 'loop', label: 'Active Loops', emoji: '&#x21BB;', items: [] },
@@ -24730,7 +24746,7 @@ function renderScheduler() {
       { key: 'weekly', label: 'Weekly &amp; Less', emoji: '&#x1F4C5;', items: [] },
     ];
     const disabled = [];
-    for (const s of schedules) {
+    for (const s of filtered) {
       if (!s.enabled) { disabled.push(s); continue; }
       const cad = schedCadence(s);
       const g = groups.find(g => g.key === cad) || groups[1];
@@ -24748,12 +24764,17 @@ function renderScheduler() {
     let html = groups.map(renderGroup).join('');
 
     if (disabled.length) {
-      html += `<details class="sched-disabled-details">
+      html += `<details class="sched-disabled-details" ${q ? 'open' : ''}>
         <summary><span class="sched-disabled-arrow">&#x25B6;</span> Inactive <span class="sched-group-count">${disabled.length}</span></summary>
         <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px;opacity:0.6;">
           ${disabled.map(renderDisabledCard).join('')}
         </div>
       </details>`;
+    }
+
+    if (!html) {
+      html = `<div style="text-align:center;padding:36px 0;color:var(--dim);font-size:0.82rem;">
+        No schedules match &ldquo;${esc(schedSearchQuery)}&rdquo;.</div>`;
     }
 
     listEl.innerHTML = html;
