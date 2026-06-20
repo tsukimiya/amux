@@ -2211,6 +2211,24 @@ _VAPID_PATH = CC_HOME / "vapid_private.pem"
 _PUSH_SUBS_PRESENT = None  # None=unknown, False=confirmed empty (skip), True=have subs
 
 
+_PUSH_SSL_CTX = None
+
+
+def _push_ssl_context():
+    """SSL context for outbound calls to push services. macOS' bundled Python
+    doesn't read the system keychain, so plain urlopen fails Apple's cert with
+    'unable to get local issuer certificate' — back it with certifi's CA bundle."""
+    global _PUSH_SSL_CTX
+    if _PUSH_SSL_CTX is not None:
+        return _PUSH_SSL_CTX
+    try:
+        import certifi
+        _PUSH_SSL_CTX = ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        _PUSH_SSL_CTX = ssl.create_default_context()
+    return _PUSH_SSL_CTX
+
+
 def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
 
@@ -2297,59 +2315,77 @@ def _encrypt_web_push(p256dh_b64: str, auth_b64: str, payload: bytes) -> bytes:
     return header + ciphertext
 
 
-def _send_one_push(endpoint: str, p256dh_b64: str, auth_b64: str, payload: bytes) -> int:
-    """Send one encrypted push. Returns the HTTP status (or 0 on transport error)."""
+def _send_one_push(endpoint: str, p256dh_b64: str, auth_b64: str, payload: bytes):
+    """Send one encrypted push. Returns (status, detail). status is the HTTP code
+    (0 on transport error); detail carries the push service's error body so we can
+    surface why Apple/Mozilla/Google rejected it."""
     import urllib.request as _ur
     from urllib.parse import urlparse as _urlparse
-    body = _encrypt_web_push(p256dh_b64, auth_b64, payload)
-    parts = _urlparse(endpoint)
-    aud = f"{parts.scheme}://{parts.netloc}"
-    _, vapid_pub = _vapid_keys()
-    req = _ur.Request(endpoint, data=body, method="POST", headers={
-        "TTL": "2419200",
-        "Content-Encoding": "aes128gcm",
-        "Content-Type": "application/octet-stream",
-        "Content-Length": str(len(body)),
-        "Authorization": f"vapid t={_vapid_jwt(aud)},k={vapid_pub}",
-    })
     try:
-        with _ur.urlopen(req, timeout=10) as resp:
-            return resp.status
+        body = _encrypt_web_push(p256dh_b64, auth_b64, payload)
+        parts = _urlparse(endpoint)
+        aud = f"{parts.scheme}://{parts.netloc}"
+        _, vapid_pub = _vapid_keys()
+        req = _ur.Request(endpoint, data=body, method="POST", headers={
+            "TTL": "2419200",
+            "Content-Encoding": "aes128gcm",
+            "Content-Type": "application/octet-stream",
+            "Content-Length": str(len(body)),
+            "Authorization": f"vapid t={_vapid_jwt(aud)},k={vapid_pub}",
+        })
+    except Exception as e:
+        slog(f"[webpush] build error: {e}")
+        return 0, f"build error: {e}"
+    try:
+        with _ur.urlopen(req, timeout=10, context=_push_ssl_context()) as resp:
+            return resp.status, ""
     except _ur.HTTPError as e:
-        return e.code
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", "replace")[:300]
+        except Exception:
+            pass
+        slog(f"[webpush] {endpoint[:50]}… -> {e.code} {detail}")
+        return e.code, detail
     except Exception as e:
         slog(f"[webpush] transport error: {e}")
-        return 0
+        return 0, f"transport error: {e}"
+
+
+def _web_push_send_all(title: str, body: str, session: str = "", tag: str = "amux", url: str = "/"):
+    """Send synchronously to every subscription. Returns a list of per-endpoint
+    {host, status, detail} results. Prunes dead (404/410) subscriptions."""
+    global _PUSH_SUBS_PRESENT
+    from urllib.parse import urlparse as _urlparse
+    payload = json.dumps({"title": title, "body": body, "session": session, "tag": tag, "url": url}).encode()
+    try:
+        db = get_db()
+        rows = db.execute("SELECT endpoint, p256dh, auth FROM push_subscriptions").fetchall()
+    except Exception as e:
+        return [{"host": "", "status": 0, "detail": f"db error: {e}"}]
+    _PUSH_SUBS_PRESENT = len(rows) > 0
+    results = []
+    for r in rows:
+        status, detail = _send_one_push(r["endpoint"], r["p256dh"], r["auth"], payload)
+        results.append({"host": _urlparse(r["endpoint"]).netloc, "status": status, "detail": detail})
+        if status in (404, 410):
+            try:
+                db.execute("DELETE FROM push_subscriptions WHERE endpoint=?", (r["endpoint"],))
+                db.commit()
+                slog("[webpush] pruned expired subscription")
+            except Exception:
+                pass
+    return results
 
 
 def _web_push_broadcast(title: str, body: str, session: str = "", tag: str = "amux", url: str = "/"):
     """Fan out a notification to every registered subscription (in a background
-    thread so callers never block on the network). Prunes dead subscriptions."""
+    thread so callers never block on the network)."""
     # Fast path: if a prior broadcast confirmed there are no subscriptions, skip
     # spawning a thread for every alert. Reset to True on subscribe.
     if _PUSH_SUBS_PRESENT is False:
         return
-    payload = json.dumps({"title": title, "body": body, "session": session, "tag": tag, "url": url}).encode()
-
-    def _run():
-        global _PUSH_SUBS_PRESENT
-        try:
-            db = get_db()
-            rows = db.execute("SELECT endpoint, p256dh, auth FROM push_subscriptions").fetchall()
-        except Exception:
-            return
-        _PUSH_SUBS_PRESENT = len(rows) > 0
-        for r in rows:
-            status = _send_one_push(r["endpoint"], r["p256dh"], r["auth"], payload)
-            if status in (404, 410):
-                try:
-                    db.execute("DELETE FROM push_subscriptions WHERE endpoint=?", (r["endpoint"],))
-                    db.commit()
-                    slog(f"[webpush] pruned expired subscription")
-                except Exception:
-                    pass
-            elif status and status >= 400:
-                slog(f"[webpush] push to endpoint returned {status}")
+    threading.Thread(target=lambda: _web_push_send_all(title, body, session, tag, url), daemon=True).start()
 
     threading.Thread(target=_run, daemon=True).start()
 
@@ -15506,12 +15542,22 @@ function _urlB64ToUint8Array(base64String) {
   return arr;
 }
 
+// serviceWorker.ready can hang forever on iOS if the SW never registers
+// (commonly an untrusted TLS cert). Race it against a timeout so callers fail
+// fast with a clear reason instead of spinning.
+function _swReady(ms) {
+  return Promise.race([
+    navigator.serviceWorker.ready,
+    new Promise((_, rej) => setTimeout(() => rej(new Error('service worker did not become ready in ' + (ms/1000) + 's')), ms)),
+  ]);
+}
+
 // Register this device for background Web Push (server can reach it with the
 // app/tab closed). Returns {ok} or {ok:false, reason}.
 async function _pushSubscribe() {
   if (!('serviceWorker' in navigator) || !('PushManager' in window)) return { ok: false, reason: 'push unsupported' };
   try {
-    const reg = await navigator.serviceWorker.ready;
+    const reg = await _swReady(8000);
     let sub = await reg.pushManager.getSubscription();
     if (!sub) {
       const r = await fetch(API + '/api/push/public-key');
@@ -15524,7 +15570,7 @@ async function _pushSubscribe() {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ endpoint: j.endpoint, keys: j.keys }),
     });
-    return { ok: true };
+    return { ok: true, endpoint: sub.endpoint };
   } catch (e) {
     return { ok: false, reason: e.message };
   }
@@ -15544,32 +15590,65 @@ async function _pushUnsubscribe() {
   } catch (e) {}
 }
 
+// Step-by-step on-device diagnostic. Uses alert() so the full report is
+// readable on a phone (toasts truncate). Leads with the iOS Home-Screen fix,
+// which is the usual cause of "this browser has no Notification API".
 async function _notifSendTest() {
-  let perm = (typeof Notification !== 'undefined') ? Notification.permission : 'unsupported';
-  if (perm === 'unsupported') { showToast('This browser has no Notification API'); return; }
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+  const standalone = window.navigator.standalone || (window.matchMedia && matchMedia('(display-mode: standalone)').matches);
+  const steps = [];
+  const report = (extra) => alert('amux push test\n\n' + steps.join('\n') + (extra ? '\n\n' + extra : ''));
+
+  // 1. Notification API present? On iOS it only exists in an installed PWA.
+  if (typeof Notification === 'undefined' || !('serviceWorker' in navigator) || !('PushManager' in window)) {
+    if (isIOS && !standalone) {
+      return report('✗ You are in Safari. iOS only allows notifications for an installed app:\n'
+        + '1. Tap the Share button\n2. "Add to Home Screen"\n3. Open amux from that new icon\n4. Then tap Test again.');
+    }
+    return report('✗ This browser has no Web Push support'
+      + (isIOS ? ' (needs iOS/iPadOS 16.4+, opened from the Home Screen).' : '.'));
+  }
+  steps.push('✓ ' + (standalone ? 'installed PWA' : 'notifications supported'));
+
+  // 2. Permission
+  let perm = Notification.permission;
   if (perm === 'default') { try { perm = await Notification.requestPermission(); } catch(e) {} }
   if (perm !== 'granted') {
-    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
-    const standalone = window.navigator.standalone || (window.matchMedia && matchMedia('(display-mode: standalone)').matches);
-    showToast(isIOS && !standalone
-      ? 'On iOS: add amux to your Home Screen (Share → Add to Home Screen), open it from there, then tap Test to allow notifications.'
-      : 'Notifications are blocked — enable them in your browser/site settings.');
-    return;
+    return report('✗ Permission: ' + perm + '. Allow notifications when prompted'
+      + (isIOS ? ', or enable amux under Settings → Notifications.' : ', or in site settings.'));
   }
-  if (!_notifsNative) { _notifsNative = true; localStorage.setItem('amux_notifs', '1'); _notifUpdateNativeBtn(); }
-  // Register for background push and trigger a REAL server push — this is the
-  // true test of "arrives even when the app is closed".
+  steps.push('✓ permission granted');
+
+  // 3. Service worker ready (hangs/fails if the TLS cert is not trusted)
+  let reg;
+  try { reg = await _swReady(8000); steps.push('✓ service worker active'); }
+  catch(e) {
+    return report('✗ ' + e.message + '\n→ The amux TLS certificate is probably not trusted on this device. '
+      + 'Install it from ' + location.origin + '/ca and enable Full Trust under '
+      + 'Settings → General → About → Certificate Trust Settings, then retry.');
+  }
+
+  // 4. Subscribe for background push
   const sub = await _pushSubscribe();
-  if (sub.ok) {
-    const r = await apiCall(API + '/api/push/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-    if (r) { showToast('Background push sent — it should arrive even with amux closed'); return; }
-    _notifPush('\u{1F514}', 'Test notification', 'Local test (server push request failed).', '');
-    return;
+  if (!sub.ok) { return report('✗ Push subscription failed: ' + (sub.reason || 'unknown')); }
+  steps.push('✓ subscribed (' + (sub.endpoint ? new URL(sub.endpoint).host : 'ok') + ')');
+  if (!_notifsNative) { _notifsNative = true; localStorage.setItem('amux_notifs', '1'); _notifUpdateNativeBtn(); }
+
+  // 5. Trigger a REAL server push and report the push service's response
+  try {
+    const r = await fetch(API + '/api/push/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    const j = await r.json();
+    const res = (j.results || [])[0] || {};
+    if (j.ok) {
+      steps.push('✓ push service accepted (HTTP ' + res.status + ')');
+      return report('A notification was sent. It should appear shortly — even with amux closed. '
+        + 'If you see nothing, check Settings → Notifications → amux (Allow, Lock Screen, Banners).');
+    }
+    return report('✗ Push service rejected it: HTTP ' + (res.status || '?')
+      + (res.detail ? '\n' + res.detail : '') + '\n(VAPID subject can be set via AMUX_VAPID_SUBJECT.)');
+  } catch (e) {
+    return report('✗ Server push request failed: ' + e.message);
   }
-  // No background push available — a local notification still proves foreground native works.
-  _notifPush('\u{1F514}', 'Test notification',
-    'If this stays on your screen, native notifications work. Background push unavailable (' + (sub.reason || '') + ').', '');
-  showToast('Sent a local test notification');
 }
 
 async function _notifToggleNative() {
@@ -34708,11 +34787,21 @@ class CCHandler(BaseHTTPRequestHandler):
             db = get_db()
             n = db.execute("SELECT COUNT(*) AS c FROM push_subscriptions").fetchone()["c"]
             if not n:
-                return self._json({"error": "no subscriptions registered on this server"}, 400)
-            _web_push_broadcast("\U0001F514 amux background push",
-                                "It works — this arrived via Web Push, even with the app closed.",
-                                session="", tag="amux-push-test")
-            return self._json({"ok": True, "sent_to": n})
+                return self._json({"error": "no subscriptions registered on this server", "sent_to": 0}, 400)
+            # Synchronous so the caller sees exactly how the push service responded.
+            results = _web_push_send_all(
+                "\U0001F514 amux background push",
+                "It works — this arrived via Web Push, even with the app closed.",
+                session="", tag="amux-push-test")
+            ok = any(200 <= (r["status"] or 0) < 300 for r in results)
+            return self._json({"ok": ok, "sent_to": n, "results": results})
+
+        if path == "/api/push/subscriptions" and method == "GET":
+            from urllib.parse import urlparse as _up
+            db = get_db()
+            rows = db.execute("SELECT endpoint, ua, created FROM push_subscriptions ORDER BY created DESC").fetchall()
+            subs = [{"host": _up(r["endpoint"]).netloc, "ua": (r["ua"] or "")[:120], "created": r["created"]} for r in rows]
+            return self._json({"count": len(subs), "subject": os.environ.get("AMUX_VAPID_SUBJECT", "mailto:amux@localhost"), "subscriptions": subs})
 
         # Map API (/api/map)
         if path == "/api/map":
