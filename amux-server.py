@@ -16321,7 +16321,9 @@ function _renderArchivedSection() {
     (s.creator || '').toLowerCase().includes(q) ||
     (s.tags || []).some(t => t.toLowerCase().includes(q))
   ) : allArchived;
-  const showExpanded = archivedExpanded || (q && archived.length > 0);
+  // Only expand when the user has explicitly toggled it open — never auto-expand
+  // on search. The footer still shows "N of M archived" so matches are discoverable.
+  const showExpanded = archivedExpanded;
   const label = q && archived.length !== allArchived.length
     ? `${archived.length} of ${allArchived.length} archived`
     : `${allArchived.length} archived`;
