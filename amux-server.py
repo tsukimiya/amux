@@ -9172,24 +9172,42 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .archived-footer:hover { border-color: var(--accent); }
   .archived-chevron { font-size: 0.65rem; transition: transform 0.15s; color: var(--dim); }
   .archived-chevron.open { transform: rotate(90deg); }
-  .archived-body { margin-top: 6px; display: flex; flex-direction: column; gap: 4px; }
+  .archived-body { margin-top: 6px; display: flex; flex-direction: column; gap: 5px; }
   .archived-card {
-    display: flex; align-items: center; gap: 8px;
-    padding: 7px 10px; border-radius: 8px; border: 1px solid var(--border);
+    display: flex; flex-direction: column; gap: 4px;
+    padding: 8px 11px; border-radius: 8px; border: 1px solid var(--border);
     background: var(--card); font-size: 0.8rem;
   }
-  .archived-card-name { font-weight: 600; color: var(--dim); flex-shrink: 0; min-width: 80px; }
-  .archived-card-meta { color: var(--dim); font-size: 0.72rem; flex-shrink: 0; }
-  .archived-card-preview { flex: 1; color: var(--dim); font-size: 0.73rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .archived-card-top { display: flex; align-items: center; gap: 7px; min-width: 0; }
+  .archived-card-name { font-weight: 600; color: var(--text); flex-shrink: 0; cursor: pointer; }
+  .archived-card-name:hover { color: var(--accent); }
+  .archived-card-chip {
+    font-size: 0.63rem; padding: 1px 6px; border-radius: 9px; flex-shrink: 0;
+    background: var(--bg); border: 1px solid var(--border); color: var(--dim); white-space: nowrap;
+  }
+  .archived-card-chip.model { color: var(--cyan, #39d2c0); }
+  .archived-card-chip.provider-codex { color: #10b981; }
+  .archived-card-chip.provider-gemini { color: #d29922; }
+  .archived-card-spacer { flex: 1; min-width: 8px; }
+  .archived-card-meta {
+    color: var(--dim); font-size: 0.7rem; display: flex; gap: 5px 10px; flex-wrap: wrap;
+    align-items: center; min-width: 0;
+  }
+  .archived-card-meta code { font-size: 0.68rem; background: var(--bg); border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; color: var(--text); }
+  .archived-card-tag { color: var(--accent); font-size: 0.68rem; }
+  .archived-card-preview {
+    color: var(--dim); font-size: 0.72rem; line-height: 1.4; min-width: 0;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
   .archived-card-actions { display: flex; gap: 4px; flex-shrink: 0; }
   .archived-wake-btn {
     padding: 3px 10px; border-radius: 5px; font-size: 0.75rem; border: 1px solid var(--accent);
-    color: var(--accent); background: transparent; cursor: pointer; white-space: nowrap;
+    color: var(--accent); background: transparent; cursor: pointer; white-space: nowrap; min-height: 28px;
   }
   .archived-wake-btn:hover { background: var(--accent); color: #000; }
   .archived-del-btn {
     padding: 3px 7px; border-radius: 5px; font-size: 0.75rem; border: 1px solid var(--border);
-    color: var(--dim); background: transparent; cursor: pointer;
+    color: var(--dim); background: transparent; cursor: pointer; min-height: 28px;
   }
   .archived-del-btn:hover { border-color: var(--red); color: var(--red); }
 
@@ -16278,6 +16296,12 @@ function _renderArchivedSection() {
     s.name.toLowerCase().includes(q) ||
     (s.dir || '').toLowerCase().includes(q) ||
     (s.desc || '').toLowerCase().includes(q) ||
+    (s.task_name || '').toLowerCase().includes(q) ||
+    (s.preview || '').toLowerCase().includes(q) ||
+    (s.branch || '').toLowerCase().includes(q) ||
+    (s.active_model || '').toLowerCase().includes(q) ||
+    (s.provider || '').toLowerCase().includes(q) ||
+    (s.creator || '').toLowerCase().includes(q) ||
     (s.tags || []).some(t => t.toLowerCase().includes(q))
   ) : allArchived;
   const showExpanded = archivedExpanded || (q && archived.length > 0);
@@ -16290,15 +16314,36 @@ function _renderArchivedSection() {
     html += '<div class="archived-body">';
     (q ? archived : allArchived).forEach(s => {
       const ago = s.last_activity ? timeAgo(s.last_activity) : '';
-      const preview = esc(s.preview || s.desc || '');
+      const created = s.session_created ? new Date(s.session_created * 1000).toLocaleDateString([], {month:'short', day:'numeric', year:'2-digit'}) : '';
+      const dir = s.dir ? s.dir.replace(/^\/Users\/[^/]+/, '~') : '';
+      const provider = s.provider && s.provider !== 'claude' ? s.provider : '';
+      const model = s.active_model || '';
+      const tokens = !s.tokens ? '' :
+        s.tokens >= 1e6 ? (s.tokens/1e6).toFixed(1) + 'M' :
+        s.tokens >= 1000 ? (s.tokens/1000).toFixed(s.tokens >= 10000 ? 0 : 1) + 'k' : String(s.tokens);
+      const body = esc(s.task_name || s.preview || s.desc || '');
+      const meta = [];
+      if (dir) meta.push(`<code title="${esc(s.dir)}">${esc(dir)}</code>`);
+      if (s.branch) meta.push(`&#x2387; ${esc(s.branch)}`);
+      if (s.worktree) meta.push(`worktree`);
+      if (ago) meta.push(`active ${ago}`);
+      if (created) meta.push(`created ${created}`);
+      if (tokens) meta.push(`${tokens} tok`);
+      if (s.creator) meta.push(`by ${esc(s.creator)}`);
+      (s.tags || []).forEach(t => meta.push(`<span class="archived-card-tag">#${esc(t)}</span>`));
       html += `<div class="archived-card" data-session="${esc(s.name)}">
-        <div class="archived-card-name">${esc(s.name)}</div>
-        ${ago ? `<div class="archived-card-meta">${ago}</div>` : ''}
-        ${preview ? `<div class="archived-card-preview">${preview}</div>` : ''}
-        <div class="archived-card-actions">
-          <button class="archived-wake-btn" onclick="wakeSession('${esc(s.name)}')">Wake</button>
-          <button class="archived-del-btn" onclick="deleteSession('${esc(s.name)}')">&#x2715;</button>
+        <div class="archived-card-top">
+          <span class="archived-card-name" onclick="openPeek('${esc(s.name)}')">${esc(s.name)}</span>
+          ${model ? `<span class="archived-card-chip model">${esc(model)}</span>` : ''}
+          ${provider ? `<span class="archived-card-chip provider-${esc(provider)}">${esc(provider)}</span>` : ''}
+          <span class="archived-card-spacer"></span>
+          <div class="archived-card-actions">
+            <button class="archived-wake-btn" onclick="wakeSession('${esc(s.name)}')">Wake</button>
+            <button class="archived-del-btn" onclick="deleteSession('${esc(s.name)}')">&#x2715;</button>
+          </div>
         </div>
+        ${meta.length ? `<div class="archived-card-meta">${meta.join('<span style="opacity:0.4;">&middot;</span>')}</div>` : ''}
+        ${body ? `<div class="archived-card-preview">${body}</div>` : ''}
       </div>`;
     });
     html += '</div>';
