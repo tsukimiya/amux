@@ -9310,6 +9310,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .sched-group-header { display:flex;align-items:center;gap:6px;font-size:0.68rem;font-weight:700;color:var(--dim);text-transform:uppercase;letter-spacing:0.06em;padding:4px 0 5px;border-bottom:1px solid var(--border);margin-bottom:6px; }
   .sched-group-count { background:var(--card);border:1px solid var(--border);border-radius:10px;padding:1px 6px;font-size:0.63rem;color:var(--dim); }
   .sched-cadence-pill { font-size:0.62rem;padding:1px 5px;border-radius:10px;border:1px solid var(--border);color:var(--dim);background:var(--card);font-family:monospace; }
+  .sched-id-badge { font-size:0.6rem;padding:1px 5px;border-radius:4px;border:1px solid var(--border);background:var(--bg);color:var(--accent);font-family:monospace;cursor:pointer;flex-shrink:0;letter-spacing:0.02em; }
+  .sched-id-badge:hover { border-color:var(--accent); }
   .sched-run-dot { display:inline-block;width:7px;height:7px;border-radius:50%;flex-shrink:0; }
   .sched-run-dot.ok { background:var(--green,#4ade80); }
   .sched-run-dot.done { background:var(--accent); }
@@ -9334,6 +9336,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .sched-chip:not(.active):hover { border-color:var(--accent); }
   .sched-mode-help { font-size:0.7rem;color:var(--dim);line-height:1.5;margin-top:7px;padding:7px 9px;background:var(--card);border:1px solid var(--border);border-radius:6px; }
   .sched-mode-help b { color:var(--text);font-weight:600; }
+  .sched-expand-btn { background:transparent;border:1px solid var(--border);color:var(--dim);border-radius:5px;min-width:26px;height:24px;cursor:pointer;font-size:0.9rem;line-height:1;display:flex;align-items:center;justify-content:center;padding:0; }
+  .sched-expand-btn:hover { border-color:var(--accent);color:var(--accent); }
+  #sched-command:focus { border-color:var(--accent);box-shadow:0 0 0 3px rgba(88,166,255,0.12); }
+  /* Fullscreen editor: box fills viewport, command grows, schedule panel stays scrollable below */
+  .board-edit-box.sched-cmd-max { height:92dvh !important; }
+  .board-edit-box.sched-cmd-max #sched-command-section { min-height:0; }
+  .board-edit-box.sched-cmd-max .sched-modal-footer { max-height:190px; }
   .badge.auto-continue { background: rgba(98,160,234,0.2); color: #62a0ea; }
   .badge.model { background: rgba(57,210,192,0.2); color: var(--cyan); }
   .badge.provider { cursor: pointer; }
@@ -13514,20 +13523,25 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
         <select id="sched-kind" style="display:none;"><option value="tmux"></option><option value="shell"></option></select>
       </div>
     </div>
-    <!-- Command: fills remaining vertical space (min floor keeps it usable when the box is content-sized) -->
-    <div style="flex:1 1 auto;display:flex;flex-direction:column;padding:10px 16px;min-height:140px;overflow:hidden;">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;flex-shrink:0;">
+    <!-- Command: the primary editing area — grows with the viewport, drag-resizable -->
+    <div id="sched-command-section" style="flex:1 1 auto;display:flex;flex-direction:column;padding:10px 16px;min-height:clamp(220px, 44dvh, 540px);overflow:hidden;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;flex-shrink:0;gap:8px;">
         <label class="field-label" id="sched-command-label" style="margin-bottom:0;">Command</label>
-        <div class="notes-mode-tabs" id="sched-command-tabs" style="margin:0;">
-          <button class="notes-mode-tab active" id="sched-cmd-tab-edit" onclick="schedCmdSwitchMode('edit')">Edit</button>
-          <button class="notes-mode-tab" id="sched-cmd-tab-preview" onclick="schedCmdSwitchMode('preview')">Preview</button>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span id="sched-command-count" style="font-size:0.66rem;color:var(--dim);"></span>
+          <button type="button" class="sched-expand-btn" id="sched-expand-btn" onclick="toggleSchedCmdFullscreen()" title="Expand editor (fills the modal)">&#x2922;</button>
+          <div class="notes-mode-tabs" id="sched-command-tabs" style="margin:0;">
+            <button class="notes-mode-tab active" id="sched-cmd-tab-edit" onclick="schedCmdSwitchMode('edit')">Edit</button>
+            <button class="notes-mode-tab" id="sched-cmd-tab-preview" onclick="schedCmdSwitchMode('preview')">Preview</button>
+          </div>
         </div>
       </div>
       <div id="sched-command-editor-wrap" style="flex:1;display:flex;min-height:0;">
-        <textarea id="sched-command" placeholder="e.g. /status or npm run build" autocomplete="off"
-          style="flex:1;resize:none;box-sizing:border-box;font-size:0.88rem;line-height:1.65;padding:10px 12px;background:var(--card);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:inherit;min-height:0;width:100%;"></textarea>
+        <textarea id="sched-command" placeholder="e.g. /status, npm run build, or a full multi-paragraph prompt…" autocomplete="off" spellcheck="false"
+          oninput="_schedCmdCount()"
+          style="flex:1;resize:vertical;box-sizing:border-box;font-size:0.86rem;line-height:1.6;padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;min-height:0;width:100%;tab-size:2;"></textarea>
       </div>
-      <div id="sched-command-preview" class="md-content" style="display:none;flex:1;padding:10px 12px;background:var(--card);border:1px solid var(--border);border-radius:6px;overflow-y:auto;font-size:0.88rem;line-height:1.65;color:var(--text);min-height:0;"></div>
+      <div id="sched-command-preview" class="md-content" style="display:none;flex:1;padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;overflow-y:auto;font-size:0.88rem;line-height:1.65;color:var(--text);min-height:0;"></div>
     </div>
     <!-- Footer: mode-specific schedule panels + buttons (scrollable) -->
     <div class="sched-modal-footer" style="flex-shrink:1;min-height:0;border-top:1px solid var(--border);overflow-y:auto;max-height:300px;padding:12px 16px 14px;">
@@ -24652,6 +24666,10 @@ function schedCadence(s) {
   return 'routine';
 }
 
+function _copySchedId(id) {
+  try { navigator.clipboard.writeText(id); } catch(e) {}
+  if (typeof showToast === 'function') showToast(id + ' copied');
+}
 function toggleSchedExpand(id) {
   const el = document.getElementById('sched-cmd-' + id);
   if (!el) return;
@@ -24720,10 +24738,10 @@ function renderScheduler() {
           </label>
           <div style="flex:1;min-width:0;">
             <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:4px;">
+              <code class="sched-id-badge" title="Schedule id — click to copy" onclick="event.stopPropagation();_copySchedId('${esc(s.id)}')">${esc(s.id)}</code>
               <span style="font-weight:600;font-size:0.84rem;cursor:pointer;" onclick="toggleSchedExpand('${esc(s.id)}')">${esc(s.title)}</span>
               <code class="sched-cadence-pill">${esc(recLabel)}</code>
               ${trigLabel}${watchLabel}${doneLabel}
-              <span style="font-size:0.63rem;color:var(--dim);user-select:all;margin-left:auto;">${esc(s.id)}</span>
             </div>
             <div style="font-size:0.72rem;display:flex;align-items:center;gap:8px;flex-wrap:wrap;color:var(--dim);">
               <span style="display:flex;align-items:center;gap:3px;">${sessLink}</span>
@@ -24762,6 +24780,7 @@ function renderScheduler() {
           </label>
           <div style="flex:1;min-width:0;">
             <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:3px;">
+              <code class="sched-id-badge" title="Schedule id — click to copy" onclick="event.stopPropagation();_copySchedId('${esc(s.id)}')">${esc(s.id)}</code>
               <span style="font-weight:600;font-size:0.82rem;">${esc(s.title)}</span>
               <code class="sched-cadence-pill">${esc(recLabel)}</code>
             </div>
@@ -25520,6 +25539,21 @@ function markRoutineChip(v) {
   document.querySelectorAll('#sched-routine-chips .sched-chip').forEach(c =>
     c.classList.toggle('active', (c.getAttribute('onclick') || '').includes("'" + v + "'")));
 }
+function _schedCmdCount() {
+  const ta = document.getElementById('sched-command');
+  const el = document.getElementById('sched-command-count');
+  if (!ta || !el) return;
+  const n = ta.value.length;
+  el.textContent = n ? (n >= 1000 ? (n/1000).toFixed(1) + 'k' : n) + ' chars' : '';
+}
+function toggleSchedCmdFullscreen() {
+  const box = document.querySelector('#sched-overlay .board-edit-box');
+  if (!box) return;
+  const on = box.classList.toggle('sched-cmd-max');
+  const btn = document.getElementById('sched-expand-btn');
+  if (btn) { btn.innerHTML = on ? '&#x2921;' : '&#x2922;'; btn.title = on ? 'Shrink editor' : 'Expand editor (fills the modal)'; }
+  setTimeout(() => document.getElementById('sched-command').focus(), 30);
+}
 function schedCmdSwitchMode(mode) {
   const ta = document.getElementById('sched-command');
   const preview = document.getElementById('sched-command-preview');
@@ -25616,6 +25650,12 @@ function openSchedModal(editId) {
   setLoopEvery(document.getElementById('sched-loop-every').value);
   markRoutineChip(document.getElementById('sched-expr').value);
   schedCmdSwitchMode('edit');
+  // reset editor expand state + char count
+  const _box = overlay.querySelector('.board-edit-box');
+  if (_box) _box.classList.remove('sched-cmd-max');
+  const _eb = document.getElementById('sched-expand-btn');
+  if (_eb) { _eb.innerHTML = '&#x2922;'; _eb.title = 'Expand editor (fills the modal)'; }
+  _schedCmdCount();
   overlay.style.display = 'flex';
   requestAnimationFrame(() => {
     overlay.classList.add('active');
