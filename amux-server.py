@@ -10192,13 +10192,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     .header-row h1 { font-size: 1.1rem; flex-shrink: 0; }
     .header-row > div { gap: 6px !important; flex-shrink: 1; min-width: 0; }
   }
-  @media (max-width: 600px) {
-    .header-row { position: relative; top: auto; }
-    .tab-bar-outer { position: relative; top: auto; margin-bottom: 4px; }
-    .board-session-group { margin-bottom: 2px; }
-    .board-session-header { padding: 6px 10px; }
-    .tag-group-body { padding: 0; }
-  }
 
   /* Header + dropdown */
   .header-add-wrap { position: relative; }
@@ -11109,6 +11102,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     margin: 0 -16px 12px -16px;
     border-bottom: 1px solid var(--border);
     position: sticky; top: var(--sticky-nav-top, calc(env(safe-area-inset-top, 0px) + 57px)); z-index: 39; background: var(--bg);
+  }
+  @media (max-width: 600px) {
+    .header-row, .tab-bar-outer { position: relative !important; top: auto !important; }
+    .tab-bar-outer { margin-bottom: 4px; }
+    .board-session-group { margin-bottom: 2px; }
+    .board-session-header { padding: 6px 10px; }
+    .tag-group-body { padding: 0; }
   }
   .tab-bar {
     display: flex; gap: 0; padding: 0 0 0 16px; flex: 1;
