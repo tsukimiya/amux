@@ -16092,8 +16092,8 @@ function render() {
     </div>`;
   }
 
-  // Freeze mode: flat list locked to captured order — bypasses status grouping
-  if (_frozen && cardOrder.length && layoutMode !== 'grid') {
+  // Freeze mode: flat list locked to captured order — bypasses status grouping and activity re-sort
+  if (_frozen && cardOrder.length) {
     const frozenList = _sortByCardOrder(filtered);
     el.innerHTML = draftCards + frozenList.map(_renderSessionCard).join('');
     for (const [id, d] of Object.entries(savedInputs)) { const inp = document.getElementById(id); if (inp) { inp.value = d.value; autoGrow(inp); } }
@@ -23381,12 +23381,29 @@ function toggleFreeze() {
     cardOrder = [];
     localStorage.removeItem('amux_card_order');
   } else {
-    // Capture current rendered order across all visible cards (works across status groups)
-    const allCards = document.querySelectorAll('#cards .card[data-session]');
-    cardOrder = Array.from(allCards).map(c => c.dataset.session);
-    if (!cardOrder.length) {
-      cardOrder = [...sessions.filter(s => !s.archived)].sort(_naturalSortSessions).map(s => s.name);
+    // Compute order using the SAME logic as render() — works even for collapsed groups
+    const visible = sessions.filter(s => !s.archived);
+    let ordered;
+    if (layoutMode === 'group') {
+      const buckets = {active: [], waiting: [], idle: [], stopped: []};
+      visible.forEach(s => {
+        if (!s.running) buckets.stopped.push(s);
+        else if (s.status === 'active') buckets.active.push(s);
+        else if (s.status === 'waiting') buckets.waiting.push(s);
+        else buckets.idle.push(s);
+      });
+      const sortFn = sortMode === 'alpha' ? _alphaSortSessions : (a, b) => {
+        if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+        return (b.last_activity || 0) - (a.last_activity || 0);
+      };
+      for (const k of Object.keys(buckets)) buckets[k].sort(sortFn);
+      ordered = [...buckets.active, ...buckets.waiting, ...buckets.idle, ...buckets.stopped];
+    } else if (sortMode === 'alpha') {
+      ordered = [...visible].sort(_alphaSortSessions);
+    } else {
+      ordered = [...visible].sort(_naturalSortSessions);
     }
+    cardOrder = ordered.map(s => s.name);
     localStorage.setItem('amux_card_order', JSON.stringify(cardOrder));
     _frozen = true;
     localStorage.setItem('amux_frozen', '1');
