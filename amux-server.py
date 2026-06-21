@@ -6911,6 +6911,61 @@ def _validate_model_name(value) -> tuple[bool, str, str]:
     return True, normalized, ""
 
 
+# Claude Code reasoning-effort levels (the --effort CLI flag). Empty = clear.
+_VALID_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+
+def _validate_effort(value) -> tuple[bool, str, str]:
+    """Validate a reasoning-effort field from a PATCH body.
+
+    Returns (ok, normalized_value, error_message). Empty string is allowed
+    and means "clear the --effort override". Mirrors _validate_model_name's
+    contract so callers handle both the same way.
+    """
+    if not isinstance(value, str):
+        return False, "", "effort must be a string"
+    normalized = value.strip().lower()
+    if normalized and normalized not in _VALID_EFFORTS:
+        return False, "", f"invalid effort (allowed: {', '.join(_VALID_EFFORTS)})"
+    return True, normalized, ""
+
+
+def _strip_effort_from_flags(flags: str) -> str:
+    """Remove any --effort X or --effort=X tokens from a flag string.
+
+    Mirrors _strip_model_from_flags. Raises ValueError on malformed input
+    so callers can surface a clear error instead of wiping the user's flags.
+    """
+    if not flags:
+        return ""
+    tokens = shlex.split(flags)  # raises ValueError on malformed input
+    filtered = []
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        if t == "--effort" and i + 1 < len(tokens):
+            i += 2
+            continue
+        if t.startswith("--effort="):
+            i += 1
+            continue
+        filtered.append(t)
+        i += 1
+    return " ".join(shlex.quote(t) for t in filtered)
+
+
+def _set_effort_flag(flags: str, effort: str) -> str:
+    """Return `flags` with --effort set to `effort` (or removed if empty).
+
+    Strips any existing --effort first, then appends the new one. Assumes
+    `effort` has already passed _validate_effort.
+    """
+    base = _strip_effort_from_flags(flags)
+    if not effort:
+        return base
+    return f"{base} --effort {effort}".strip() if base else f"--effort {effort}"
+
+
 _SESSION_PROVIDERS = ("claude", "codex", "gemini", "iterm2")
 
 
@@ -14336,7 +14391,7 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
         onkeydown="editAcKeydown(event)">
       <div id="edit-ac-list" class="ac-list"></div>
     </div>
-    <select id="edit-select" style="display:none;" onchange="submitEdit()">
+    <select id="edit-select" style="display:none;" onchange="_editSelectChanged()">
       <option value="" id="model-default-opt">Default</option>
       <option value="opus">opus</option>
       <option value="sonnet">sonnet</option>
@@ -14352,6 +14407,18 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
       <option value="claude-sonnet-4-6[1m]">claude-sonnet-4-6 [1M]</option>
       <option value="claude-haiku-4-5-20251001">claude-haiku-4-5-20251001</option>
     </select>
+    <div id="edit-effort-wrap" style="display:none;margin-top:12px;">
+      <label class="field-label" style="display:block;margin-bottom:5px;font-size:0.78rem;color:var(--dim);">Reasoning effort</label>
+      <select id="edit-effort-select">
+        <option value="">Default</option>
+        <option value="low">low</option>
+        <option value="medium">medium</option>
+        <option value="high">high</option>
+        <option value="xhigh">xhigh</option>
+        <option value="max">max</option>
+      </select>
+      <div style="font-size:0.72rem;color:var(--dim);margin-top:5px;line-height:1.4;">Higher effort = more thinking, slower &amp; pricier. Changing this restarts the session.</div>
+    </div>
     <div class="edit-actions">
       <button class="btn" onclick="closeEdit()">Cancel</button>
       <button class="btn primary" onclick="submitEdit()">Save</button>
@@ -16921,6 +16988,8 @@ function editField(session, field, current, provider) {
   const inp = document.getElementById('edit-input');
   const sel = document.getElementById('edit-select');
   const inpWrap = document.getElementById('edit-input-wrap');
+  const _effW = document.getElementById('edit-effort-wrap');
+  if (_effW) _effW.style.display = 'none';  // only the Claude model branch re-shows it
   if (field === 'provider') {
     const providers = [
       {v:'claude',l:'Claude Code'},
@@ -16963,6 +17032,18 @@ function editField(session, field, current, provider) {
       sel.appendChild(opt);
       sel.value = current;
     }
+    // Reasoning effort — Claude only. Pre-fill from the session's current --effort flag.
+    const effortWrap = document.getElementById('edit-effort-wrap');
+    if (effortWrap) {
+      if (provider === 'claude' || !provider) {
+        const s = sessions.find(x => x.name === session);
+        const effortSel = document.getElementById('edit-effort-select');
+        if (effortSel) effortSel.value = s ? flagValue(s.flags || '', '--effort') : '';
+        effortWrap.style.display = '';
+      } else {
+        effortWrap.style.display = 'none';
+      }
+    }
   } else {
     inpWrap.style.display = '';
     sel.style.display = 'none';
@@ -16978,8 +17059,16 @@ function closeEdit() {
   document.getElementById('edit-ac-list').classList.remove('open');
   document.getElementById('edit-input-wrap').style.display = '';
   document.getElementById('edit-select').style.display = 'none';
+  const _effW = document.getElementById('edit-effort-wrap');
+  if (_effW) _effW.style.display = 'none';
   tagAcItems = []; tagAcSelected = -1;
   editState = null;
+}
+// edit-select auto-submits for quick single-select fields (provider), but the
+// model field pairs with the reasoning-effort dial, so it waits for Save.
+function _editSelectChanged() {
+  if (editState && editState.field === 'model') return;
+  submitEdit();
 }
 async function submitEdit() {
   if (!editState) return;
@@ -16988,6 +17077,13 @@ async function submitEdit() {
     : document.getElementById('edit-input').value.trim();
   if (!val && editState.field !== 'desc' && editState.field !== 'tags' && editState.field !== 'model' && editState.field !== 'task') return;
   const { session, field } = editState;
+  // Capture the reasoning-effort dial before closeEdit() tears the dialog down.
+  let _effortVal = null;
+  if (field === 'model') {
+    const _eff = document.getElementById('edit-effort-select');
+    const _effW = document.getElementById('edit-effort-wrap');
+    if (_eff && _effW && _effW.style.display !== 'none') _effortVal = _eff.value;
+  }
   closeEdit();
   if (field === 'duplicate') {
     await apiCall(API + '/api/sessions/' + session + '/duplicate', {
@@ -17005,9 +17101,11 @@ async function submitEdit() {
       body: JSON.stringify({ rename: val })
     });
   } else if (field === 'model') {
+    const payload = { model: val };
+    if (_effortVal !== null) payload.effort = _effortVal;  // Claude only
     await apiCall(API + '/api/sessions/' + session + '/config', {
       method: 'PATCH', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ model: val })
+      body: JSON.stringify(payload)
     });
   } else if (field === 'provider') {
     await apiCall(API + '/api/sessions/' + session + '/config', {
@@ -39674,6 +39772,18 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                         )
                     else:
                         flags = flags_no_model
+                    # Apply reasoning effort (Claude --effort flag) when the UI
+                    # sends it alongside the model. Only present for Claude.
+                    if "effort" in body:
+                        ok_e, effort_val, err_e = _validate_effort(body.get("effort", ""))
+                        if not ok_e:
+                            return self._json({"error": err_e}, 400)
+                        try:
+                            flags = _set_effort_flag(flags, effort_val)
+                        except ValueError as e:
+                            return self._json({
+                                "error": f"existing CC_FLAGS for session '{name}' is malformed ({e}); fix the .env file manually before updating effort"
+                            }, 400)
                     cfg["CC_FLAGS"] = flags
                     current_provider = cfg.get("CC_PROVIDER", "claude").strip().lower() or "claude"
                     if current_provider not in _SESSION_PROVIDERS:
