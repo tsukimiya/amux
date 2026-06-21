@@ -11140,10 +11140,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     display: flex; align-items: stretch;
     margin: 0 -16px 12px -16px;
     border-bottom: 1px solid var(--border);
-    position: sticky; top: var(--sticky-nav-top, calc(env(safe-area-inset-top, 0px) + 57px)); z-index: 39; background: var(--bg);
+    position: relative; z-index: 39; background: var(--bg);
   }
   @media (max-width: 600px) {
-    .header-row, .tab-bar-outer { position: relative !important; top: auto !important; }
+    .header-row { position: relative !important; top: auto !important; }
     .tab-bar-outer { margin-bottom: 4px; }
     .board-session-group { margin-bottom: 2px; }
     .board-session-header { padding: 6px 10px; }
@@ -23965,10 +23965,7 @@ function _chromeUpdateOffsets() {
       const h = _chromeCollapsed ? 0 : ctb.offsetHeight;
       document.documentElement.style.setProperty('--chrome-tab-h', h + 'px');
     }
-    if (hr) {
-      const bodyPadTop = parseInt(getComputedStyle(document.body).paddingTop) || 0;
-      document.documentElement.style.setProperty('--sticky-nav-top', (bodyPadTop + hr.offsetHeight) + 'px');
-    }
+    // --sticky-nav-top no longer used (tab-bar-outer is position:relative)
   });
 }
 
