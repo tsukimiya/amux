@@ -2552,6 +2552,17 @@ def _at_resume_picker(clean_output: str) -> bool:
                 "⌕" in clean_output)  # ⌕ search icon in the picker
 
 
+def _at_compact_resume_prompt(clean_output: str) -> bool:
+    """Return True if Claude is showing the 'Resume from summary' compaction dialog.
+
+    This appears when a session's context is large and Claude Code asks whether to
+    compact before resuming. Option 1 (Resume from summary) is pre-selected.
+    """
+    return bool(clean_output and
+                "Resume from summary" in clean_output and
+                "Resume full session" in clean_output)
+
+
 def _at_shell_prompt(clean_output: str) -> bool:
     """Return True if the terminal looks like a bare shell prompt (no Claude UI)."""
     if _claude_ui_visible(clean_output):
@@ -2678,6 +2689,26 @@ def _snapshot_all_sessions_inner():
                             f"Auto-compacted '{name}' — corrupted image in context")
             elif not _img_corrupt_error:
                 actions.pop("img_corrupt_compacted", None)
+
+            # ── 1d. Reactive: compact/resume dialog → auto-select "Resume from summary" ──
+            # When a session's context is large, CC shows an interactive dialog:
+            #   ❯ 1. Resume from summary (recommended)
+            #     2. Resume full session as-is
+            #     3. Don't ask me again
+            # Option 1 is pre-selected; pressing Enter confirms it.
+            # Guard: 120s cooldown to avoid double-firing if the dialog lingers.
+            if (_at_compact_resume_prompt(clean) and
+                    now - actions.get("last_compact_prompt", 0) > 120):
+                _ac_row2 = get_db().execute("SELECT value FROM prefs WHERE key='auto_compact_enabled'").fetchone()
+                _ac_enabled2 = (_ac_row2 is None) or (_ac_row2[0] != "0")
+                if _ac_enabled2:
+                    actions["last_compact_prompt"] = now
+                    subprocess.run(
+                        ["tmux", "send-keys", "-t", tmux_target(name), "Enter"],
+                        capture_output=True, timeout=5,
+                    )
+                    _push_alert("auto_compact", name,
+                                f"Auto-selected 'Resume from summary' for '{name}'")
 
             # ── 2. Reactive: thinking-block corruption → restart + replay ───
             if ("redacted_thinking" in clean and
@@ -5750,6 +5781,10 @@ def _detect_claude_status(raw_output: str) -> str:
     # appears there at ALL times (even at idle), so we skip this check and let
     # the spinner scan below determine the real state.
     if not status_bar:
+        # Compact/resume dialog has "Esc to cancel" which would false-positive as
+        # "esc t" → active. Detect it first and return "waiting" instead.
+        if "Resume from summary" in clean and "Resume full session" in clean:
+            return "waiting"
         for l in lines[-5:]:
             if re.search(r"esc t", l.lower()):
                 return "active"
