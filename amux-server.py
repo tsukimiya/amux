@@ -290,9 +290,27 @@ def _build_proc_info() -> dict:
     except Exception:
         pass
     try:
+        # Use current RSS (not peak) so the watchdog reacts to actual pressure,
+        # not a one-time spike that has since been reclaimed.
         import resource as _res
         ru = _res.getrusage(_res.RUSAGE_SELF)
-        info["memory_mb"] = round(ru.ru_maxrss / (1024 * 1024), 1) if sys.platform == "darwin" else round(ru.ru_maxrss / 1024, 1)
+        peak_mb = round(ru.ru_maxrss / (1024 * 1024), 1) if sys.platform == "darwin" else round(ru.ru_maxrss / 1024, 1)
+        info["peak_memory_mb"] = peak_mb
+        # Current RSS from /proc or ps
+        import subprocess as _sp
+        current_mb = None
+        try:
+            with open(f"/proc/{os.getpid()}/status") as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        current_mb = round(int(line.split()[1]) / 1024, 1)
+                        break
+        except FileNotFoundError:
+            r = _sp.run(["ps", "-o", "rss=", "-p", str(os.getpid())],
+                        capture_output=True, text=True, timeout=3)
+            if r.returncode == 0 and r.stdout.strip():
+                current_mb = round(int(r.stdout.strip()) / 1024, 1)
+        info["memory_mb"] = current_mb if current_mb is not None else peak_mb
     except Exception:
         pass
     try:
