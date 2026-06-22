@@ -11836,6 +11836,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   .gp-close:hover { background: rgba(248,81,73,0.15); color: #f85149; }
   .gp-peek-btn:hover { background: rgba(88,166,255,0.12); color: #58a6ff; }
+  /* Snap-to-fraction width presets in the pane header */
+  .gp-size { display: flex; gap: 1px; flex-shrink: 0; }
+  .gp-size-btn {
+    background: none; border: none; color: var(--dim); cursor: pointer;
+    font-size: 0.72rem; padding: 2px 4px; min-width: 18px; border-radius: 3px;
+    line-height: 1; flex-shrink: 0; -webkit-tap-highlight-color: transparent;
+  }
+  .gp-size-btn:hover { background: rgba(88,166,255,0.12); color: #58a6ff; }
+  .gp-size-btn.active { color: var(--accent); background: rgba(88,166,255,0.16); }
   .gp-body {
     flex: 1; overflow: auto; padding: 10px;
     font-family: "SF Mono","Fira Code","Cascadia Code",monospace;
@@ -26987,6 +26996,30 @@ function toggleGridPane(name) {
   else addGridPane(name);
 }
 
+// Snap a workspace pane to a fraction of the 12-column grid:
+// 4 = ⅓, 6 = ½, 8 = ⅔, 12 = full width. Works for any pane type via the
+// enclosing .grid-stack-item, so the same control fits session/term/note panes.
+function wsSetFraction(btn, cols, ev) {
+  if (ev) ev.stopPropagation();
+  if (!_grid || !btn.closest) return;
+  const item = btn.closest('.grid-stack-item');
+  if (!item) return;
+  _grid.update(item, { w: cols });
+  const grp = btn.parentElement;
+  if (grp) grp.querySelectorAll('.gp-size-btn').forEach(b => b.classList.toggle('active', b === btn));
+  setTimeout(() => { if (typeof _wsTermRefitAll === 'function') _wsTermRefitAll(); }, 60);
+  _gridSaveLayout();
+}
+
+function _gpSizeButtons() {
+  return '<div class="gp-size">' +
+    '<button class="gp-size-btn" title="Third width" onclick="wsSetFraction(this,4,event)">&#x2153;</button>' +
+    '<button class="gp-size-btn" title="Half width" onclick="wsSetFraction(this,6,event)">&#xBD;</button>' +
+    '<button class="gp-size-btn" title="Two-thirds width" onclick="wsSetFraction(this,8,event)">&#x2154;</button>' +
+    '<button class="gp-size-btn" title="Full width" onclick="wsSetFraction(this,12,event)">&#x26F6;</button>' +
+  '</div>';
+}
+
 function addGridPane(name, x, y, w, h) {
   if (!_grid || _gridPanes[name]) return;
   const sid = _gpSafeId(name);
@@ -26995,6 +27028,7 @@ function addGridPane(name, x, y, w, h) {
     '<div class="gp-header">' +
       '<span class="gp-dot" id="' + sid + '-dot"></span>' +
       '<span class="gp-title">' + esc(name) + '</span>' +
+      _gpSizeButtons() +
       '<button class="gp-peek-btn" onclick="openPeek(\'' + safeName + '\');event.stopPropagation();" title="Open in peek">&#x2197;</button>' +
       '<button class="gp-close" onclick="removeGridPane(\'' + safeName + '\')">&#x2715;</button>' +
     '</div>' +
@@ -27385,6 +27419,7 @@ function wsAddNotePane(path, x, y, w, h) {
     '<div class="gp-header" style="background:var(--card);">' +
       '<span style="font-size:0.75rem;margin-right:4px;">&#x1F4DD;</span>' +
       '<span class="gp-title" id="' + sid + '-title">' + esc(title) + '</span>' +
+      _gpSizeButtons() +
       '<button class="gp-peek-btn" onclick="wsOpenNoteInTab(\'' + safePath + '\');event.stopPropagation();" title="Open in Notes tab">&#x2197;</button>' +
       '<button class="gp-close" onclick="wsRemoveNotePane(\'' + safePath + '\')">&#x2715;</button>' +
     '</div>' +
@@ -27523,6 +27558,7 @@ function wsAddTermPane(x, y, w, h, pid) {
     '<div class="gp-header">' +
       '<span style="font-size:0.76rem;margin-right:2px;opacity:0.55;font-family:monospace;">&gt;_</span>' +
       '<span class="gp-title" id="' + sid + '-title">shell</span>' +
+      _gpSizeButtons() +
       '<button class="gp-peek-btn" onclick="wsTermSendTmux(\'' + safeId + '\')" title="Attach / create a tmux session">tmux</button>' +
       '<button class="gp-close" onclick="wsRemoveTermPane(\'' + safeId + '\')">&#x2715;</button>' +
     '</div>' +
