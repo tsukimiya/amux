@@ -6017,6 +6017,113 @@ def _set_commit_guard_session(name: str, enabled: bool | None):
     _write_env(env_file, cfg)
 
 
+# ── Task guard: nudge sessions to keep the board reflecting their work ──
+_task_guard_nudged: dict[str, bool] = {}  # session -> nudged this idle episode (re-armed when active)
+
+
+def _task_guard_enabled() -> bool:
+    """Global on/off for the idle task-guard (persisted as AMUX_TASK_GUARD in
+    ~/.amux/server.env). Default OFF — opt-in, since it can nudge any session
+    that idles without a tracked board issue."""
+    return os.environ.get("AMUX_TASK_GUARD", "0").strip().lower() in ("1", "true", "on", "yes")
+
+
+def _task_guard_session_enabled(name: str) -> bool:
+    """Per-session override for the task-guard; falls back to the global toggle."""
+    env_file = CC_SESSIONS / f"{name}.env"
+    if env_file.exists():
+        val = parse_env_file(env_file).get("AMUX_TASK_GUARD_SESSION", "").strip().lower()
+        if val in ("0", "false", "off", "no"):
+            return False
+        if val in ("1", "true", "on", "yes"):
+            return True
+    return _task_guard_enabled()
+
+
+def _set_task_guard_session(name: str, enabled: bool | None):
+    """Write (or clear) the per-session task-guard override in the session .env."""
+    env_file = CC_SESSIONS / f"{name}.env"
+    cfg = parse_env_file(env_file) if env_file.exists() else {}
+    if enabled is None:
+        cfg.pop("AMUX_TASK_GUARD_SESSION", None)
+    else:
+        cfg["AMUX_TASK_GUARD_SESSION"] = "1" if enabled else "0"
+    _write_env(env_file, cfg)
+
+
+def _session_has_doing_issue(name: str) -> bool:
+    """True if this session has a board issue currently in 'doing'."""
+    try:
+        row = get_db().execute(
+            "SELECT 1 FROM issues WHERE session=? AND status='doing' AND deleted IS NULL LIMIT 1",
+            (name,)
+        ).fetchone()
+        return bool(row)
+    except Exception:
+        return False
+
+
+def _board_digest(max_per_section: int = 12) -> str:
+    """Compact all-sessions board snapshot for injecting into a session so it's
+    aware of what every other session has in progress / queued / recently done."""
+    try:
+        rows = get_db().execute(
+            "SELECT session, title, status FROM issues "
+            "WHERE deleted IS NULL AND status IN ('doing','todo','done') "
+            "ORDER BY updated DESC"
+        ).fetchall()
+    except Exception:
+        return ""
+    doing, todo, done = [], [], []
+    for r in rows:
+        line = f"  [{r['session'] or '-'}] {r['title']}"
+        if r["status"] == "doing" and len(doing) < max_per_section:
+            doing.append(line)
+        elif r["status"] == "todo" and len(todo) < max_per_section:
+            todo.append(line)
+        elif r["status"] == "done" and len(done) < max_per_section:
+            done.append(line)
+    parts = []
+    if doing:
+        parts.append("DOING (in progress across all sessions):\n" + "\n".join(doing))
+    if todo:
+        parts.append("TODO (queued):\n" + "\n".join(todo))
+    if done:
+        parts.append("RECENTLY DONE:\n" + "\n".join(done))
+    return "\n\n".join(parts)
+
+
+def _task_guard(name: str) -> bool:
+    """When a session goes idle with NO board issue tracked as 'doing', it likely
+    did untracked work. Nudge it once per idle episode to record its task(s) on
+    the board (re-armed when the session next goes active). Sessions that follow
+    the task-ledger rule keep an issue in 'doing' and are never nudged. Returns
+    True iff it sent a nudge this cycle."""
+    if not _task_guard_session_enabled(name):
+        return False
+    try:
+        if _task_guard_nudged.get(name):
+            return False
+        if _session_has_doing_issue(name):
+            return False  # already tracking — _complete_session_board_issue will close it
+        _task_guard_nudged[name] = True
+        msg = ("You went idle but have no board issue tracked as 'doing'. If you just did "
+               "real work, record it on the board now so every session stays aware — create "
+               "an issue for your session and set its status:\n"
+               "  amux board add \"<what you did>\"   # then: amux board done ITEM_ID\n")
+        digest = _board_digest()
+        if digest:
+            msg += "\nCurrent board across all sessions:\n" + digest
+        if is_running(name):
+            send_text(name, msg)
+        _push_alert("untracked_task", name, "idle with no tracked board issue — nudged to log it")
+        slog(f"[task-guard] {name}: nudged (no doing issue)")
+        return True
+    except Exception as e:
+        slog(f"[task-guard] {name}: {e}")
+        return False
+
+
 def _commit_guard(name: str) -> bool:
     """When a session goes idle, if it left uncommitted work, nudge it once per
     dirty episode to commit (re-armed once the tree goes clean). amux only detects
@@ -6116,8 +6223,9 @@ def list_sessions() -> list:
                 _fire_schedule_event("session_idle", source_session=name)
                 def _on_idle(sname=name):
                     nudged = _commit_guard(sname)        # remind to commit dirty work
+                    task_nudged = _task_guard(sname)     # remind to log untracked work on the board
                     _complete_session_board_issue(sname)
-                    if not nudged:                       # don't pile a new task on a commit nudge
+                    if not nudged and not task_nudged:   # don't pile a new task on a nudge
                         _pickup_next_board_task(sname)
                 threading.Thread(target=_on_idle, daemon=True).start()
             elif status == "idle" and prev == "idle" and not running:
@@ -6125,6 +6233,8 @@ def list_sessions() -> list:
             elif status == "" and prev in ("active", "waiting", "idle"):
                 # Session went from running to not running
                 threading.Thread(target=_complete_session_board_issue, args=(name,), daemon=True).start()
+            if status == "active":
+                _task_guard_nudged.pop(name, None)       # re-arm task-guard for the next idle episode
             _session_prev_status[name] = status if running else ""
             # Filter for intelligible content lines
             intelligible = []
@@ -6577,7 +6687,7 @@ def _evict_stale_caches():
         _model_cache.pop(k, None)
     # Prune session-keyed dicts for sessions that no longer have .env files
     live_sessions = {f.stem for f in CC_SESSIONS.glob("*.env")}
-    for d in (_session_auto_actions, _yolo_last_responded, _last_jsonl_backup, _session_prev_status, _commit_guard_nudged):
+    for d in (_session_auto_actions, _yolo_last_responded, _last_jsonl_backup, _session_prev_status, _commit_guard_nudged, _task_guard_nudged):
         stale_keys = [k for k in d if k not in live_sessions]
         for k in stale_keys:
             d.pop(k, None)
@@ -6594,6 +6704,7 @@ def _cleanup_session_state(name: str):
     _last_jsonl_backup.pop(name, None)
     _session_prev_status.pop(name, None)
     _commit_guard_nudged.pop(name, None)
+    _task_guard_nudged.pop(name, None)
     with _send_locks_lock:
         _send_locks.pop(name, None)
 
@@ -7838,10 +7949,23 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                 _start_pending_log_reload_thread(name, pending_log_reload_reason)
             # Re-send this session's standing instruction once it's booted and ready,
             # so directives survive restarts/compaction (closed-loop autonomy config).
+            # When the board-awareness system is on, also brief the session on the
+            # current cross-session board state so it starts aware of all sessions' work.
             _instr = _session_instructions(name)
-            if _instr:
-                threading.Thread(target=_send_after_ready, args=(name, _instr, 60),
-                                 daemon=True, name=f"instr-{name}").start()
+            _digest = _board_digest() if _task_guard_enabled() else ""
+            if _instr or _digest:
+                def _send_boot_briefing(sname=name, instr=_instr, digest=_digest):
+                    if instr:
+                        _send_after_ready(sname, instr, 60)
+                    if digest:
+                        if instr:
+                            time.sleep(1.0)  # space the two sends out
+                        _send_after_ready(
+                            sname,
+                            "Cross-session board snapshot — keep your own work logged "
+                            "here (todo/doing/done):\n\n" + digest, 60)
+                threading.Thread(target=_send_boot_briefing, daemon=True,
+                                 name=f"boot-{name}").start()
             return True, "started"
         except subprocess.CalledProcessError as e:
             return False, e.stderr.decode(errors="replace")
@@ -13025,6 +13149,15 @@ setTimeout(function(){var f=document.getElementById('js-fallback');if(f&&f.style
             Nudge sessions to commit when they go idle with uncommitted work
           </label>
           <div id="settings-commitguard-status" style="font-size:0.7rem;color:var(--dim);margin-top:4px;"></div>
+        </div>
+        <div class="settings-sep"></div>
+        <div class="settings-section" id="settings-taskguard-section">
+          <div class="settings-section-label">Board awareness</div>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:0.8rem;">
+            <input type="checkbox" id="settings-taskguard-toggle" style="width:auto;accent-color:var(--accent);" onchange="saveTaskGuard(this.checked)">
+            Nudge sessions to log tasks on the board, and brief each session on all sessions' tasks at startup
+          </label>
+          <div id="settings-taskguard-status" style="font-size:0.7rem;color:var(--dim);margin-top:4px;"></div>
         </div>
         <div class="settings-sep"></div>
         <div class="settings-section" id="settings-notes-section">
@@ -28850,6 +28983,7 @@ function toggleSettings() {
     // Populate the notes-folder row
     _notesLoadSource();
     loadCommitGuard();
+    loadTaskGuard();
   }
 }
 
@@ -29075,6 +29209,32 @@ async function saveCommitGuard(enabled) {
     if (r.ok) {
       if (st) st.textContent = enabled ? 'On — sessions are nudged to commit on idle' : 'Off';
       showToast('Commit guard ' + (enabled ? 'enabled' : 'disabled'));
+    } else if (st) { st.textContent = 'Save failed'; }
+  } catch(e) { if (st) st.textContent = 'Error: ' + e.message; }
+}
+
+// ── Board awareness (task guard) ──────────────────────────────────────────────
+const _taskGuardStatusOn = 'On — idle sessions are nudged to log tasks; new sessions get an all-board briefing';
+async function loadTaskGuard() {
+  try {
+    const r = await fetch('/api/settings/task-guard');
+    const d = await r.json();
+    const t = document.getElementById('settings-taskguard-toggle');
+    const st = document.getElementById('settings-taskguard-status');
+    if (t) t.checked = !!d.enabled;
+    if (st) st.textContent = d.enabled ? _taskGuardStatusOn : 'Off';
+  } catch(e) {}
+}
+async function saveTaskGuard(enabled) {
+  const st = document.getElementById('settings-taskguard-status');
+  try {
+    const r = await fetch('/api/settings/task-guard', {
+      method: 'PATCH', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({enabled})
+    });
+    if (r.ok) {
+      if (st) st.textContent = enabled ? _taskGuardStatusOn : 'Off';
+      showToast('Board awareness ' + (enabled ? 'enabled' : 'disabled'));
     } else if (st) { st.textContent = 'Save failed'; }
   } catch(e) { if (st) st.textContent = 'Error: ' + e.message; }
 }
@@ -38108,6 +38268,25 @@ return "not_found"
                 _server_env_file.parent.mkdir(parents=True, exist_ok=True)
                 _server_env_file.write_text("\n".join(lines) + "\n")
                 os.environ["AMUX_COMMIT_GUARD"] = val  # live effect
+                return self._json({"ok": True, "enabled": enabled})
+
+        if path == "/api/settings/task-guard":
+            if method == "GET":
+                return self._json({"enabled": _task_guard_enabled()})
+            if method == "PATCH":
+                body = self._read_body()
+                enabled = bool(body.get("enabled", False))
+                val = "1" if enabled else "0"
+                lines = _server_env_file.read_text().splitlines() if _server_env_file.exists() else []
+                found = False
+                for i, line in enumerate(lines):
+                    if line.startswith("AMUX_TASK_GUARD=") or line.startswith("AMUX_TASK_GUARD ="):
+                        lines[i] = f"AMUX_TASK_GUARD={val}"; found = True; break
+                if not found:
+                    lines.append(f"AMUX_TASK_GUARD={val}")
+                _server_env_file.parent.mkdir(parents=True, exist_ok=True)
+                _server_env_file.write_text("\n".join(lines) + "\n")
+                os.environ["AMUX_TASK_GUARD"] = val  # live effect
                 return self._json({"ok": True, "enabled": enabled})
 
         if path == "/api/settings/env":
