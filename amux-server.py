@@ -1569,6 +1569,101 @@ def save_session_log(session: str, content: str, force: bool = False):
         pass
 
 
+def _alt_conv_lines(capture: str) -> tuple[list[str], list[str]]:
+    """Split a Claude Code alt-screen capture into the conversation portion,
+    trimming the trailing TUI chrome (spinner + task list, separator bars, the
+    prompt box and the status bar, plus trailing blanks). Returns
+    (orig_lines, plain_lines) for just the conversation — the chrome is volatile
+    and re-drawn every capture, so it must not be accumulated into history."""
+    orig = capture.splitlines()
+    plain = [_STRIP_ANSI.sub("", l) for l in orig]
+    n = len(orig)
+    lo = max(0, n - 22)
+    cut = n
+    # If a spinner line (… ellipsis) sits in the bottom region, chrome begins at
+    # the run of blank lines just above it (spinner + task list + footer below).
+    for i in range(n - 1, lo - 1, -1):
+        if "…" in plain[i]:
+            j = i
+            while j - 1 >= 0 and plain[j - 1].strip() == "":
+                j -= 1
+            cut = j
+            break
+    else:
+        # Idle (no spinner): trim trailing separator bars / prompt / status / blanks.
+        for i in range(n - 1, lo - 1, -1):
+            p = plain[i].strip()
+            is_bar = len(p) >= 8 and all(c in "─━—-=· " for c in p)
+            if (p == "" or is_bar or "bypass permissions on" in p
+                    or "for shortcuts" in p or p.startswith("❯")):
+                cut = i
+            else:
+                break
+    while cut > 0 and plain[cut - 1].strip() == "":
+        cut -= 1
+    return orig[:cut], plain[:cut]
+
+
+def save_alt_capture(name: str, capture: str):
+    """Append only the genuinely-new conversation lines from an alt-screen
+    capture to the session log. Claude Code's alt buffer redraws the same
+    viewport in place, so naively appending each capture stacks ~30 near-
+    identical snapshots (repeated status bars, boot messages, 77% dupes). This
+    trims the TUI chrome and de-duplicates the overlap with what's already
+    saved, keeping the log a clean linear transcript. Throttled like
+    save_session_log."""
+    if not capture.strip():
+        return
+    now = time.monotonic()
+    last = _last_log_save.get(name, 0)
+    if now - last < _LOG_SAVE_INTERVAL:
+        return
+    conv_orig, conv_plain = _alt_conv_lines(capture)
+    cnp = [p.rstrip() for p in conv_plain]
+    if not any(p.strip() for p in cnp):
+        return
+    lp = _log_path(name)
+    existing_tail = ""
+    if lp.exists():
+        try:
+            size = lp.stat().st_size
+            with lp.open("rb") as f:
+                if size > 32_768:
+                    f.seek(size - 32_768)
+                existing_tail = f.read().decode("utf-8", errors="replace")
+        except Exception:
+            existing_tail = ""
+    tailp = [_STRIP_ANSI.sub("", l).rstrip() for l in existing_tail.splitlines()]
+    # Longest prefix of the new conversation that already exists as a contiguous
+    # block in the recent tail → append only the lines after it.
+    k = 0
+    maxk = min(len(cnp), 80)
+    for cand in range(maxk, 0, -1):
+        block = cnp[:cand]
+        for st in range(len(tailp) - cand, -1, -1):
+            if tailp[st:st + cand] == block:
+                k = cand
+                break
+        if k:
+            break
+    new_lines = conv_orig[k:]
+    _last_log_save[name] = now
+    if not any(_STRIP_ANSI.sub("", l).strip() for l in new_lines):
+        return  # nothing new since last save
+    CC_LOGS.mkdir(parents=True, exist_ok=True)
+    chunk = ("\n".join(new_lines) + "\n").encode("utf-8", errors="replace")
+    try:
+        existing_size = lp.stat().st_size if lp.exists() else 0
+        if existing_size + len(chunk) > MAX_LOG_BYTES:
+            existing = lp.read_bytes() if lp.exists() else b""
+            lp.write_bytes((existing + chunk)[-MAX_LOG_BYTES:])
+        else:
+            with lp.open("ab") as f:
+                f.write(chunk)
+    except Exception:
+        pass
+
+
 def load_session_log(session: str, tail_bytes: int = 0) -> str:
     """Load saved session log from disk.
 
@@ -39554,11 +39649,13 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 # whatever was last appended to the log.
                 # Keep saving the live capture (throttled) so the alt-screen log
                 # keeps accumulating scroll-up history — the alt buffer has no
-                # native scrollback, so this is the only history source.
+                # native scrollback, so this is the only history source. Use the
+                # de-duplicating saver so the redrawn viewport doesn't stack into
+                # dozens of near-identical snapshots.
                 if output:
                     last_save = _last_log_save.get(name, 0)
                     if now - last_save >= _LOG_SAVE_INTERVAL:
-                        threading.Thread(target=save_session_log, args=(name, output), daemon=True).start()
+                        threading.Thread(target=save_alt_capture, args=(name, output), daemon=True).start()
                 saved = load_session_log(name, tail_bytes=65_536)
                 if saved:
                     live = output.strip() if output else ""
