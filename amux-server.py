@@ -1385,6 +1385,23 @@ def tmux_capture(session: str, lines: int = 500) -> str:
         return ""
 
 
+def _tmux_alt_screen(session: str) -> bool:
+    """True if the pane is in the alternate screen buffer (TUI mode, e.g. Claude
+    Code). The alt buffer has NO scrollback, so capture-pane only ever returns
+    the visible window — peek must fall back to the saved log for history."""
+    iterm2_id = _session_iterm2_id(session)
+    if iterm2_id:
+        return False
+    try:
+        r = subprocess.run(
+            ["tmux", "display-message", "-t", tmux_target(session), "-p", "#{alternate_on}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return r.stdout.strip() == "1"
+    except Exception:
+        return False
+
+
 def _tmux_capture_batch(sessions: list, lines: int = 30) -> dict:
     """Capture pane output for multiple sessions in parallel using threads.
     Returns {session_name: output_str}."""
@@ -39491,9 +39508,13 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                         _peek_cache[name] = (now, lines, output)
                 tmux_lines = len(output.splitlines()) if output else 0
                 # Fall back to log if tmux returned nothing, OR too sparse (< 30 lines
-                # and < ¼ of requested) — Claude Code's alt-screen TUI causes
-                # capture-pane to return only the visible prompt, not the full history.
-                use_log = not output or (tmux_lines < 30 and tmux_lines < lines // 4)
+                # and < ¼ of requested), OR the pane is in the alternate screen
+                # buffer — Claude Code's alt-screen TUI has NO scrollback, so
+                # capture-pane only returns the visible window (no scroll-up).
+                # The saved log carries the history; the live capture is appended
+                # to the bottom below so the current screen still shows.
+                use_log = (not output or _tmux_alt_screen(name)
+                           or (tmux_lines < 30 and tmux_lines < lines // 4))
                 if output and not use_log:
                     last_save = _last_log_save.get(name, 0)
                     if now - last_save >= _LOG_SAVE_INTERVAL:
@@ -39504,6 +39525,13 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 # still show their CURRENT screen (spinner/activity) at the bottom.
                 # Without this, the live window is discarded and the peek freezes on
                 # whatever was last appended to the log.
+                # Keep saving the live capture (throttled) so the alt-screen log
+                # keeps accumulating scroll-up history — the alt buffer has no
+                # native scrollback, so this is the only history source.
+                if output:
+                    last_save = _last_log_save.get(name, 0)
+                    if now - last_save >= _LOG_SAVE_INTERVAL:
+                        threading.Thread(target=save_session_log, args=(name, output), daemon=True).start()
                 saved = load_session_log(name, tail_bytes=65_536)
                 if saved:
                     live = output.strip() if output else ""
