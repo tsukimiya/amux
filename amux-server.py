@@ -16210,7 +16210,7 @@ async function fetchSessions() {
       sessions = data;
       localStorage.setItem('amux_sessions_cache', j);
       render();
-      _fetchGitBranches(sessions);
+      if (!window._peekEmbed) _fetchGitBranches(sessions);
     }
   } catch(e) {
     console.error('fetch sessions:', e);
@@ -28231,7 +28231,7 @@ async function _runDeltaSync() {
   }
 }
 // Run delta sync shortly after startup (after queue replay window)
-setTimeout(_runDeltaSync, 2500);
+if (!window._peekEmbed) setTimeout(_runDeltaSync, 2500);
 _applyTabVisibility();
 
 // ═══════ SSE — real-time push updates ═══════
@@ -28375,6 +28375,7 @@ function _resyncEverything() {
 }
 function _onClientResume(reason) {
   if (document.hidden) return;
+  if (window._peekEmbed) { refreshPeek(); return; }
   // Always pull fresh state — cheap and the user expects up-to-date data.
   if (_lastDataTime && Date.now() - _lastDataTime > _SSE_REFRESH_MS) {
     _resyncEverything();
@@ -28392,13 +28393,19 @@ window.addEventListener('online',    () => _onClientResume('online'));
 setInterval(() => {
   if (document.hidden) return;
   if (_sseFallback) return;
+  if (window._peekEmbed) return;
   if (_sseLooksStale()) _forceSseReconnect('watchdog stale ' + Math.round((Date.now() - _lastDataTime)/1000) + 's');
 }, 5000);
 
-// Start SSE (falls back to polling on failure)
-connectSSE();
-// Fetch schedules once at startup so session cards can show scheduler counts
-fetchSchedules().then(() => render());
+if (window._peekEmbed) {
+  // Peek-embed iframes only need one fetchSessions to detect the session, then the
+  // peek timer handles everything.  Skip SSE/board/git/sync to avoid 5x request
+  // amplification when multiple workspace tiles are open.
+  fetchSessions();
+} else {
+  connectSSE();
+  fetchSchedules().then(() => render());
+}
 _notifUpdateBadge();
 loadBranding();
 // JS initialized — hide the no-JS fallback overlay
