@@ -16432,6 +16432,7 @@ function render() {
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','name','${esc(s.name)}')"><span class="mi">&#x270E;</span> Rename</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','provider','${esc(provider)}')"><span class="mi">&#x21C4;</span> Provider: ${pLabel}</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','model','${esc(model||"")}','${esc(provider)}')"><span class="mi">&#x2699;</span> Model${model ? ': '+esc(model) : ''}</div>
+          ${provider === 'claude' ? `<div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','effort','${esc(effort||"")}','${esc(provider)}')"><span class="mi">&#x1F9E0;</span> Effort${effort ? ': '+esc(effort) : ' (default)'}</div>` : ''}
           <div class="card-menu-item" onclick="event.stopPropagation();toggleYolo('${s.name}')"><span class="mi">${isYolo?'&#x2611;':'&#x2610;'}</span> YOLO mode</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','desc','${esc(s.desc||"")}')"><span class="mi">&#x1F4DD;</span> Description</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','tags','${esc(s.tags.join(", "))}')"><span class="mi">&#x1F3F7;</span> Tags</div>
@@ -17340,7 +17341,7 @@ if (window._AMUX_DEFAULT_MODEL) {
 let editState = null;  // {session, field, current}
 function editField(session, field, current, provider) {
   closeAllMenus();
-  const titles = { name: 'Rename session', provider: 'Change provider', model: 'Change model', dir: 'Change directory', desc: 'Set description', tags: 'Edit tags', task: 'Edit task label', duplicate: 'Duplicate session', clone: 'Clone & continue' };
+  const titles = { name: 'Rename session', provider: 'Change provider', model: 'Change model', effort: 'Reasoning effort', dir: 'Change directory', desc: 'Set description', tags: 'Edit tags', task: 'Edit task label', duplicate: 'Duplicate session', clone: 'Clone & continue' };
   const placeholders = { name: 'Session name', model: 'e.g. opus, sonnet, haiku', dir: window._cloudEmail ? '/root' : '/path/to/project', desc: 'Brief description...', tags: 'e.g. work, frontend, urgent', task: 'e.g. Fix login bug (blank to auto-generate)', duplicate: 'New session name', clone: 'New session name' };
   document.getElementById('edit-title').textContent = titles[field] || 'Edit';
   const inp = document.getElementById('edit-input');
@@ -17402,6 +17403,16 @@ function editField(session, field, current, provider) {
         effortWrap.style.display = 'none';
       }
     }
+  } else if (field === 'effort') {
+    const efforts = [
+      {v:'',l:'Default'},{v:'low',l:'low'},{v:'medium',l:'medium'},
+      {v:'high',l:'high'},{v:'xhigh',l:'xhigh'},{v:'max',l:'max'}
+    ];
+    sel.innerHTML = '';
+    efforts.forEach(e => { const o = document.createElement('option'); o.value = e.v; o.textContent = e.l; sel.appendChild(o); });
+    inpWrap.style.display = 'none';
+    sel.style.display = 'block';
+    sel.value = current || '';
   } else {
     inpWrap.style.display = '';
     sel.style.display = 'none';
@@ -17410,7 +17421,7 @@ function editField(session, field, current, provider) {
   }
   document.getElementById('edit-overlay').classList.add('active');
   editState = { session, field };
-  if (field !== 'model' && field !== 'provider') setTimeout(() => { inp.focus({ preventScroll: true }); inp.select(); }, 100);
+  if (field !== 'model' && field !== 'provider' && field !== 'effort') setTimeout(() => { inp.focus({ preventScroll: true }); inp.select(); }, 100);
 }
 function closeEdit() {
   document.getElementById('edit-overlay').classList.remove('active');
@@ -17430,10 +17441,10 @@ function _editSelectChanged() {
 }
 async function submitEdit() {
   if (!editState) return;
-  const val = (editState.field === 'model' || editState.field === 'provider')
+  const val = (editState.field === 'model' || editState.field === 'provider' || editState.field === 'effort')
     ? document.getElementById('edit-select').value.trim()
     : document.getElementById('edit-input').value.trim();
-  if (!val && editState.field !== 'desc' && editState.field !== 'tags' && editState.field !== 'model' && editState.field !== 'task') return;
+  if (!val && editState.field !== 'desc' && editState.field !== 'tags' && editState.field !== 'model' && editState.field !== 'task' && editState.field !== 'effort') return;
   const { session, field } = editState;
   // Capture the reasoning-effort dial before closeEdit() tears the dialog down.
   let _effortVal = null;
@@ -17469,6 +17480,11 @@ async function submitEdit() {
     await apiCall(API + '/api/sessions/' + session + '/config', {
       method: 'PATCH', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ provider: val })
+    });
+  } else if (field === 'effort') {
+    await apiCall(API + '/api/sessions/' + session + '/config', {
+      method: 'PATCH', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ effort: val })
     });
   } else if (field === 'dir') {
     await apiCall(API + '/api/sessions/' + session + '/config', {
@@ -40278,6 +40294,45 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                             pass
                     suffix = " (session restarted; log reload queued)" if restarted else ""
                     return self._json({"ok": True, "message": f"model set to {model_val}{suffix}"})
+
+                # Change reasoning effort only (no model change). Claude --effort flag.
+                if "effort" in body:
+                    ok_e, effort_val, err_e = _validate_effort(body.get("effort", ""))
+                    if not ok_e:
+                        return self._json({"error": err_e}, 400)
+                    try:
+                        flags = _set_effort_flag(cfg.get("CC_FLAGS", ""), effort_val)
+                    except ValueError as e:
+                        return self._json({
+                            "error": f"existing CC_FLAGS for session '{name}' is malformed ({e}); fix the .env file manually before updating effort"
+                        }, 400)
+                    cfg["CC_FLAGS"] = flags
+                    current_provider = cfg.get("CC_PROVIDER", "claude").strip().lower() or "claude"
+                    if current_provider not in _SESSION_PROVIDERS:
+                        current_provider = "claude"
+                    was_running = is_running(name)
+                    if _capture_log_tail_for_reload(name, "effort change"):
+                        _mark_pending_log_reload(name, "effort change")
+                    _write_env(env_file, cfg)
+                    # Restart so the new --effort takes effect (same rationale as model).
+                    restarted = False
+                    if was_running:
+                        try:
+                            if current_provider == "claude":
+                                work_dir_pre = str(Path(cfg.get("CC_DIR", str(Path.home()))).expanduser().resolve())
+                                conv_id = _live_conv_id(name, work_dir_pre)
+                                if conv_id:
+                                    meta_pre = _load_meta(name)
+                                    if meta_pre.get("cc_conversation_id") != conv_id:
+                                        meta_pre["cc_conversation_id"] = conv_id
+                                        _save_meta(name, meta_pre)
+                            _stop_session_for_restart(name, current_provider)
+                            ok_r, _ = start_session(name)
+                            restarted = bool(ok_r)
+                        except Exception:
+                            pass
+                    suffix = " (session restarted; log reload queued)" if restarted else ""
+                    return self._json({"ok": True, "message": f"effort set to {effort_val or 'default'}{suffix}"})
 
                 # Toggle YOLO (permissions skip + auto-continue combined)
                 if body.get("toggle_yolo") or body.get("toggle_auto_continue"):
