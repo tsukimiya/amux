@@ -9816,6 +9816,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .board-edit-box.sched-cmd-max .sched-modal-footer { max-height:190px; }
   .badge.auto-continue { background: rgba(98,160,234,0.2); color: #62a0ea; }
   .badge.model { background: rgba(57,210,192,0.2); color: var(--cyan); }
+  .badge.effort { background: rgba(192,132,252,0.18); color: #c084fc; cursor: pointer; }
   .badge.provider { cursor: pointer; }
   .badge.claude { background: rgba(88,166,255,0.18); color: var(--accent); }
   .badge.codex { background: rgba(16,185,129,0.2); color: #10b981; }
@@ -16243,10 +16244,11 @@ function updatePeekStatus() {
       ? 'Type a message (session is working)...'
       : 'Type a message or drop a file...';
   }
-  // Model badge
+  // Model badge (+ reasoning effort, Claude only)
   const mb = document.getElementById('peek-model-badge');
   if (mb) {
-    mb.textContent = sessionConfiguredModel(s);
+    const _eff = sessionProvider(s) === 'claude' ? flagValue((s && s.flags) || '', '--effort') : '';
+    mb.textContent = sessionConfiguredModel(s) + (_eff ? ' · ' + _eff : '');
   }
 }
 
@@ -16410,6 +16412,7 @@ function render() {
     const isYolo = flags.includes('--dangerously-skip-permissions') || flags.includes('--dangerously-bypass-approvals-and-sandbox') || flags.includes('--yolo') || !!s.auto_continue;
     const provider = sessionProvider(s);
     const model = sessionConfiguredModel(s);
+    const effort = provider === 'claude' ? flagValue(flags, '--effort') : '';
     const pLabel = providerLabel(provider);
     const schedCount = schedules.filter(sc => sc.session === s.name && sc.enabled).length;
     return `
@@ -16475,6 +16478,7 @@ function render() {
         <span class="badge provider ${provider}" onclick="event.stopPropagation();editField('${s.name}','provider','${esc(provider)}')" title="Change provider">${pLabel}</span>
         ${isYolo ? '<span class="badge yolo">YOLO</span>' : ''}
         ${model ? `<span class="badge model" onclick="event.stopPropagation();editField('${s.name}','model','${esc(model)}','${esc(provider)}')" title="Change model">${esc(model)}</span>` : ''}
+        ${effort ? `<span class="badge effort" onclick="event.stopPropagation();editField('${s.name}','model','${esc(model)}','${esc(provider)}')" title="Reasoning effort — click to change">${esc(effort)}</span>` : ''}
         ${s.tags.map(t => `<span class="tag" data-tag="${esc(t)}" onclick="event.stopPropagation();toggleTagFilter('${esc(t)}')">${esc(t)}</span>`).join('')}
       </div>` : ''}
       ${!s.running ? `<div style="padding:6px 0 2px;" onclick="event.stopPropagation()">
