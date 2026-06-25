@@ -1676,6 +1676,25 @@ def save_alt_capture(name: str, capture: str):
         pass
 
 
+# Raw cursor-move / hide-cursor escapes — the fingerprint of pre-stable-frame
+# alt-screen garbage (captured TUI redraws). Clean logs and clean transcript
+# renders use only colour SGR codes (…m) and have effectively zero of these.
+_CURSOR_MOVE_RE = re.compile(r'\x1b\[(?:\d+;\d+H|\?25[lh]|\d+[ABCD]|H)')
+
+
+def _log_looks_torn(text: str) -> bool:
+    """True if a saved-log chunk is dense with raw cursor-move escapes — i.e. it
+    predates the stable-frame saver and is torn TUI-redraw spam rather than a
+    clean linear transcript."""
+    if not text:
+        return False
+    n = len(text)
+    if n < 2000:
+        return False
+    c = len(_CURSOR_MOVE_RE.findall(text))
+    return c >= 20 and (c / (n / 1024)) >= 2.0
+
+
 def load_session_log(session: str, tail_bytes: int = 0) -> str:
     """Load saved session log from disk.
 
@@ -1817,6 +1836,34 @@ def _render_session_transcript(name: str, max_chars: int = 40000) -> str:
         if nl > 0:
             text = text[nl + 1:]
     return text
+
+
+_healing_logs: set = set()  # sessions whose log is being rebuilt right now
+
+
+def _heal_log_from_transcript(name: str):
+    """One-time repair: replace a torn pre-stable-frame alt-screen log with a
+    clean tail rendered from the authoritative JSONL transcript. No-op if the
+    session has no JSONL or a heal for it is already in flight. The full history
+    always remains available via the Transcript tab; we keep only a ~2MB tail in
+    the log since the peek only ever displays the last 64KB."""
+    if name in _healing_logs:
+        return
+    _healing_logs.add(name)
+    try:
+        clean = _render_session_transcript(name, max_chars=2_000_000)
+        if not clean.strip():
+            return  # no JSONL (e.g. non-Claude session) — leave the log as-is
+        header = ("=== history rebuilt from clean JSONL transcript "
+                  "(full history in the Transcript tab) ===\n\n")
+        data = (header + clean).rstrip() + "\n"
+        lp = _log_path(name)
+        CC_LOGS.mkdir(parents=True, exist_ok=True)
+        lp.write_bytes(data.encode("utf-8", errors="replace"))
+    except Exception:
+        pass
+    finally:
+        _healing_logs.discard(name)
 
 
 # Tracks last JSONL backup mtime per session to avoid redundant copies
@@ -39974,6 +40021,17 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     if now - last_save >= _LOG_SAVE_INTERVAL:
                         threading.Thread(target=save_alt_capture, args=(name, output), daemon=True).start()
                 saved = load_session_log(name, tail_bytes=65_536)
+                # Self-heal pre-stable-frame garbage: if the saved tail is torn
+                # TUI-redraw spam (logs that accumulated before the stable-frame
+                # saver and never refreshed because the session stayed busy),
+                # serve clean history from the JSONL transcript and rebuild the
+                # on-disk log in the background so later peeks are cheap reads.
+                if saved and _log_looks_torn(saved):
+                    clean = _render_session_transcript(name, max_chars=120_000)
+                    if clean:
+                        saved = clean
+                        threading.Thread(target=_heal_log_from_transcript,
+                                         args=(name,), daemon=True).start()
                 if saved:
                     live = output.strip() if output else ""
                     if live and not saved.rstrip().endswith(live):
