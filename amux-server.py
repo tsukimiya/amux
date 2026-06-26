@@ -1402,16 +1402,40 @@ def _tmux_alt_screen(session: str) -> bool:
         return False
 
 
-def _tmux_capture_batch(sessions: list, lines: int = 30) -> dict:
+_capture_cache: dict[str, tuple[int, str]] = {}  # session -> (activity_ts, output)
+
+
+def _tmux_capture_batch(sessions: list, lines: int = 30,
+                        activity: dict | None = None) -> dict:
     """Capture pane output for multiple sessions in parallel using threads.
-    Returns {session_name: output_str}."""
+    Returns {session_name: output_str}.
+
+    When *activity* is provided (from _tmux_info_map()), sessions whose
+    tmux activity timestamp hasn't changed since the last capture are served
+    from _capture_cache, avoiding a subprocess fork per unchanged session.
+    """
     if not sessions:
         return {}
-    from concurrent.futures import ThreadPoolExecutor
-    def _cap(name):
-        return name, tmux_capture(name, lines)
-    with ThreadPoolExecutor(max_workers=min(len(sessions), 16)) as pool:
-        return dict(pool.map(_cap, sessions))
+    result = {}
+    need_capture = []
+    for name in sessions:
+        if activity:
+            act_ts = activity.get(tmux_name(name), {}).get("activity", 0)
+            cached = _capture_cache.get(name)
+            if cached and cached[0] == act_ts:
+                result[name] = cached[1]
+                continue
+        need_capture.append(name)
+    if need_capture:
+        from concurrent.futures import ThreadPoolExecutor
+        def _cap(name):
+            return name, tmux_capture(name, lines)
+        with ThreadPoolExecutor(max_workers=min(len(need_capture), 16)) as pool:
+            for name, output in pool.map(_cap, need_capture):
+                act_ts = activity.get(tmux_name(name), {}).get("activity", 0) if activity else 0
+                _capture_cache[name] = (act_ts, output)
+                result[name] = output
+    return result
 
 
 # ── iTerm2 integration (AppleScript via osascript) ────────────────────────────
@@ -1593,7 +1617,9 @@ def _alt_conv_lines(capture: str) -> tuple[list[str], list[str]]:
         # Idle (no spinner): trim trailing separator bars / prompt / status / blanks.
         for i in range(n - 1, lo - 1, -1):
             p = plain[i].strip()
-            is_bar = len(p) >= 8 and all(c in "─━—-=· " for c in p)
+            bar_ct = sum(1 for c in p if c in "─━—-=")
+            is_bar = len(p) >= 8 and (all(c in "─━—-=· " for c in p)
+                                      or bar_ct >= len(p) * 0.5)
             if (p == "" or is_bar or "bypass permissions on" in p
                     or "for shortcuts" in p or p.startswith("❯")):
                 cut = i
@@ -1645,7 +1671,27 @@ def save_alt_capture(name: str, capture: str):
                 existing_tail = f.read().decode("utf-8", errors="replace")
         except Exception:
             existing_tail = ""
-    tailp = [_STRIP_ANSI.sub("", l).rstrip() for l in existing_tail.splitlines()]
+    # Collapse blank runs in both sides before comparing — the log has already
+    # been collapsed, but the alt-screen capture hasn't, so line counts diverge.
+    def _collapse_lines(lines, orig_lines=None):
+        out, out_orig = [], []
+        blank = 0
+        for i, l in enumerate(lines):
+            if l.strip() == "":
+                blank += 1
+                if blank <= 1:
+                    out.append(l)
+                    if orig_lines is not None:
+                        out_orig.append(orig_lines[i])
+            else:
+                blank = 0
+                out.append(l)
+                if orig_lines is not None:
+                    out_orig.append(orig_lines[i])
+        return (out, out_orig) if orig_lines is not None else (out, None)
+    cnp, conv_orig_c = _collapse_lines(cnp, conv_orig)
+    tailp_raw = [_STRIP_ANSI.sub("", l).rstrip() for l in existing_tail.splitlines()]
+    tailp, _ = _collapse_lines(tailp_raw)
     # Longest prefix of the new conversation that already exists as a contiguous
     # block in the recent tail → append only the lines after it.
     k = 0
@@ -1658,7 +1704,7 @@ def save_alt_capture(name: str, capture: str):
                 break
         if k:
             break
-    new_lines = conv_orig[k:]
+    new_lines = conv_orig_c[k:]
     _last_log_save[name] = now
     if not any(_STRIP_ANSI.sub("", l).strip() for l in new_lines):
         return  # nothing new since last save
@@ -6617,7 +6663,7 @@ def list_sessions() -> list:
     # Pre-compute which sessions are running and batch-capture their panes
     env_files = [f for f in sorted(CC_SESSIONS.glob("*.env")) if not _is_session_blocked(f.stem)]
     running_names = [f.stem for f in env_files if tmux_name(f.stem) in tmux_info]
-    captures = _tmux_capture_batch(running_names, 30) if running_names else {}
+    captures = _tmux_capture_batch(running_names, 30, activity=tmux_info) if running_names else {}
     # Token cache is refreshed by background job (_refresh_token_cache via scheduler)
     # Batch-load "doing" board tasks per session for task_name display
     try:
@@ -7645,7 +7691,11 @@ def _capture_log_tail_for_reload(name: str, reason: str) -> bool:
         safe_reason = reason.replace("\n", " ").strip() or "session swap"
         ts = time.strftime("%Y-%m-%dT%H:%M:%S")
         marker = f"\n\n=== Captured before {safe_reason}: {ts} ===\n\n".encode()
-        chunks.append(marker + captured)
+        cap_text = captured.decode("utf-8", errors="replace")
+        if _tmux_alt_screen(name):
+            conv_orig, _ = _alt_conv_lines(cap_text)
+            cap_text = _collapse_blank_runs("\n".join(conv_orig))
+        chunks.append(marker + cap_text.encode("utf-8", errors="replace"))
 
     if not chunks:
         return False
@@ -40012,6 +40062,13 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     last_save = _last_log_save.get(name, 0)
                     if now - last_save >= _LOG_SAVE_INTERVAL:
                         threading.Thread(target=save_session_log, args=(name, output), daemon=True).start()
+                    resp = {"name": name, "output": _collapse_blank_runs(output)}
+                    _peek_cache[name] = (now, lines, resp)
+                    return self._json(resp)
+                if output and _tmux_alt_screen(name):
+                    last_save = _last_log_save.get(name, 0)
+                    if now - last_save >= _LOG_SAVE_INTERVAL:
+                        threading.Thread(target=save_alt_capture, args=(name, output), daemon=True).start()
                     resp = {"name": name, "output": _collapse_blank_runs(output)}
                     _peek_cache[name] = (now, lines, resp)
                     return self._json(resp)
