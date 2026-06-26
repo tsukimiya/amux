@@ -4877,12 +4877,19 @@ def _summarize_task_bg(session_name: str, text: str):
 
 def _auto_create_board_issue(session_name: str, title: str, prompt_text: str):
     """Create or update a board issue for a session task. If the session already has an
-    active (non-done/discarded) issue, update its title instead of creating a duplicate."""
+    active (non-done/discarded) issue, update its title instead of creating a duplicate.
+
+    Only ever repurposes an existing **agent** issue. A session-tagged
+    owner_type='human' item (a commitment/tracker/bet) must never be hijacked —
+    its title overwritten and moved to 'doing' — by the session's auto-labeller;
+    if the session's only active issue is human, we create a fresh agent issue
+    instead. See AMUX-1471 (footgun hit by MO-2029 / MS-921)."""
     try:
         db = get_db()
-        # Check for existing active issue for this session
+        # Check for existing active *agent* issue for this session (never a human tracker)
         existing = db.execute(
             "SELECT id, status FROM issues WHERE session=? AND deleted IS NULL "
+            "AND owner_type='agent' "
             "AND status NOT IN ('done','verified','discarded') ORDER BY created DESC LIMIT 1",
             (session_name,)
         ).fetchone()
@@ -4947,6 +4954,11 @@ def _complete_session_board_issue(session_name: str):
     being worked on. Skips tasks with gh:* tags — those are owned by the
     SessionEnd hook (board-gh-sync.py) which has gh CLI access for posting
     GH comments.
+
+    Only auto-closes owner_type='agent' issues. A session-tagged human
+    commitment/tracker must NOT be marked done just because the session went
+    idle — its work is the human's, not the agent's (done != verified). See
+    AMUX-1471 (footgun hit by MO-2029 / MS-921).
     """
     try:
         db = get_db()
@@ -4954,6 +4966,7 @@ def _complete_session_board_issue(session_name: str):
             "SELECT i.id FROM issues i "
             "WHERE i.session=? AND i.deleted IS NULL "
             "AND i.status IN ('doing') "
+            "AND i.owner_type='agent' "
             "ORDER BY i.created DESC",
             (session_name,)
         ).fetchall()
@@ -4979,13 +4992,18 @@ def _complete_session_board_issue(session_name: str):
 def _pickup_next_board_task(session_name: str):
     """Pick up the next queued (todo) board task for this session.
     Called after a session completes its current task and goes idle.
-    Moves the task to 'doing' and sends the title+desc to the session."""
+    Moves the task to 'doing' and sends the title+desc to the session.
+
+    Only auto-runs owner_type='agent' tasks. A session-tagged human
+    commitment/tracker must never be silently executed by the agent — it's a
+    thing the human owns, queued to the session only for visibility. See
+    AMUX-1471 (footgun hit by MO-2029 / MS-921)."""
     try:
         time.sleep(3)
         db = get_db()
         row = db.execute(
             "SELECT id, title, desc FROM issues "
-            "WHERE session=? AND status='todo' AND deleted IS NULL "
+            "WHERE session=? AND status='todo' AND owner_type='agent' AND deleted IS NULL "
             "ORDER BY created ASC LIMIT 1",
             (session_name,)
         ).fetchone()
