@@ -40065,17 +40065,37 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     resp = {"name": name, "output": _collapse_blank_runs(output)}
                     _peek_cache[name] = (now, lines, resp)
                     return self._json(resp)
-                if output and _tmux_alt_screen(name):
-                    last_save = _last_log_save.get(name, 0)
-                    if now - last_save >= _LOG_SAVE_INTERVAL:
-                        threading.Thread(target=save_alt_capture, args=(name, output), daemon=True).start()
-                    resp = {"name": name, "output": _collapse_blank_runs(output)}
-                    _peek_cache[name] = (now, lines, resp)
-                    return self._json(resp)
                 if output:
                     last_save = _last_log_save.get(name, 0)
                     if now - last_save >= _LOG_SAVE_INTERVAL:
-                        threading.Thread(target=save_alt_capture, args=(name, output), daemon=True).start()
+                        if _tmux_alt_screen(name):
+                            threading.Thread(target=save_alt_capture, args=(name, output), daemon=True).start()
+                        else:
+                            threading.Thread(target=save_alt_capture, args=(name, output), daemon=True).start()
+                if _tmux_alt_screen(name) and output:
+                    live = output.strip()
+                    saved = load_session_log(name, tail_bytes=65_536)
+                    if saved:
+                        conv_orig, _ = _alt_conv_lines(live)
+                        live_conv_cmp = _collapse_blank_runs(
+                            _STRIP_ANSI.sub("", "\n".join(conv_orig))).rstrip()
+                        saved_cmp = _collapse_blank_runs(
+                            _STRIP_ANSI.sub("", saved)).rstrip()
+                        if live_conv_cmp and saved_cmp.endswith(live_conv_cmp):
+                            # Conversation is in saved log. Append only the
+                            # live bottom (spinner/prompt/status).
+                            live_lines = live.splitlines()
+                            bottom = "\n".join(live_lines[len(conv_orig):]).strip()
+                            combined = saved.rstrip()
+                            if bottom:
+                                combined += "\n\n" + bottom + "\n"
+                        else:
+                            combined = saved.rstrip() + "\n\n" + live + "\n"
+                        resp = {"name": name, "output": _collapse_blank_runs(combined), "saved": True}
+                    else:
+                        resp = {"name": name, "output": _collapse_blank_runs(live)}
+                    _peek_cache[name] = (now, lines, resp)
+                    return self._json(resp)
                 saved = load_session_log(name, tail_bytes=65_536)
                 if saved and _log_looks_torn(saved):
                     clean = _render_session_transcript(name, max_chars=120_000)
