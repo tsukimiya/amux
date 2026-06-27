@@ -1556,7 +1556,10 @@ _last_log_save: dict[str, float] = {}  # session -> monotonic time of last save
 _LOG_SAVE_INTERVAL = 30  # seconds between saves per session
 
 _peek_cache: dict[str, tuple[float, int, dict]] = {}  # session -> (monotonic_time, lines, response_dict)
-_PEEK_CACHE_TTL = 4.0  # seconds — exceeds client poll interval (3s) so most polls hit cache
+_PEEK_CACHE_TTL = 4.0  # seconds
+
+_transcript_render_cache: dict[tuple, tuple[float, int, str]] = {}  # (path, max_chars) -> (mtime, size, rendered)
+_jsonl_path_cache: dict[str, tuple[float, "Path | None"]] = {}  # session -> (monotonic, path)
 
 
 def save_session_log(session: str, content: str, force: bool = False):
@@ -1788,6 +1791,16 @@ def _session_jsonl_path(name: str):
     """Newest Claude Code JSONL conversation file for a session's working dir,
     or None. This is the authoritative, complete transcript (never torn like the
     alt-screen snapshot log)."""
+    now = time.monotonic()
+    cached = _jsonl_path_cache.get(name)
+    if cached and (now - cached[0]) < 10:
+        return cached[1]
+    result = _session_jsonl_path_uncached(name)
+    _jsonl_path_cache[name] = (now, result)
+    return result
+
+
+def _session_jsonl_path_uncached(name: str):
     env_file = CC_SESSIONS / f"{name}.env"
     if not env_file.exists():
         return None
@@ -1846,9 +1859,16 @@ def _render_session_transcript(name: str, max_chars: int = 40000) -> str:
     path = _session_jsonl_path(name)
     if not path:
         return ""
+    try:
+        st = path.stat()
+    except OSError:
+        return ""
+    cache_key = (str(path), max_chars)
+    cached = _transcript_render_cache.get(cache_key)
+    if cached and cached[0] == st.st_mtime and cached[1] == st.st_size:
+        return cached[2]
     # Read only the tail of the file — JSONL entries are much larger than their
     # rendered form, so 5x max_chars (min 5MB) is a safe overread estimate.
-    # This avoids loading 50+ MB files into memory on every peek poll.
     max_read = max(max_chars * 5, 5_000_000)
     out: list[str] = []
     for o in _iter_jsonl_tail(path, max_bytes=max_read):
@@ -1895,6 +1915,7 @@ def _render_session_transcript(name: str, max_chars: int = 40000) -> str:
         nl = text.find("\n")
         if nl > 0:
             text = text[nl + 1:]
+    _transcript_render_cache[cache_key] = (st.st_mtime, st.st_size, text)
     return text
 
 
@@ -28548,8 +28569,9 @@ async function _initWsTermPane(pid) {
 function _wsTermStartPoll(pid) {
   const p = _wsTerm[pid];
   if (!p || p.poll || !p.ptyId) return;
-  p.poll = setInterval(async () => {
-    if (!p.ptyId) return;
+  p.poll = true;
+  async function tick() {
+    if (!p.poll || !p.ptyId) return;
     try {
       const r = await fetch(API + '/api/terminal/' + p.ptyId + '/output');
       const d = await r.json();
@@ -28559,11 +28581,14 @@ function _wsTermStartPoll(pid) {
       }
       if (!d.alive) {
         p.term.writeln('\r\n\x1b[33m[Process exited]\x1b[0m');
-        clearInterval(p.poll); p.poll = null; p.ptyId = null;
+        p.poll = null; p.ptyId = null;
         _wsTermSavePtyId(pid, null);
+        return;
       }
     } catch(e) {}
-  }, 50);
+    if (p.poll) p.poll = setTimeout(tick, 100);
+  }
+  p.poll = setTimeout(tick, 100);
 }
 
 function wsTermSendTmux(pid) {
@@ -28580,7 +28605,7 @@ function wsTermSendTmux(pid) {
 function wsRemoveTermPane(pid) {
   const p = _wsTerm[pid];
   if (!p || !_grid) return;
-  if (p.poll) { clearInterval(p.poll); p.poll = null; }
+  if (p.poll) { clearTimeout(p.poll); p.poll = null; }
   if (p.ptyId) { fetch(API + '/api/terminal/' + p.ptyId, { method: 'DELETE' }).catch(() => {}); p.ptyId = null; }
   if (p.term) { try { p.term.dispose(); } catch(e) {} p.term = null; }
   _wsTermSavePtyId(pid, null);
@@ -31471,7 +31496,7 @@ async function _termConnect() {
     _term.dispose();
     _term = null;
   }
-  if (_termPoll) { clearInterval(_termPoll); _termPoll = null; }
+  if (_termPoll) { clearTimeout(_termPoll); _termPoll = null; }
   if (_termId) {
     fetch(API + '/api/terminal/' + _termId, { method: 'DELETE' }).catch(() => {});
     _termId = null;
@@ -31558,9 +31583,9 @@ async function _termConnect() {
     }).catch(() => {});
   });
 
-  // Poll for output
-  _termPoll = setInterval(async () => {
-    if (!_termId) return;
+  // Poll for output (sequential setTimeout to avoid request pileup)
+  async function _termTick() {
+    if (!_termPoll || !_termId) return;
     try {
       const r = await fetch(API + '/api/terminal/' + _termId + '/output');
       const d = await r.json();
@@ -31571,19 +31596,21 @@ async function _termConnect() {
       if (!d.alive) {
         _term.writeln('\r\n\x1b[33m[Process exited]\x1b[0m');
         document.getElementById('term-status').textContent = 'Disconnected';
-        clearInterval(_termPoll);
         _termPoll = null;
         document.getElementById('term-connect-btn').style.display = '';
         document.getElementById('term-disconnect-btn').style.display = 'none';
+        return;
       }
     } catch (e) {}
-  }, 50);
+    if (_termPoll) _termPoll = setTimeout(_termTick, 100);
+  }
+  _termPoll = setTimeout(_termTick, 100);
 
   _term.focus();
 }
 
 function _termDisconnect() {
-  if (_termPoll) { clearInterval(_termPoll); _termPoll = null; }
+  if (_termPoll) { clearTimeout(_termPoll); _termPoll = null; }
   if (_termId) {
     fetch(API + '/api/terminal/' + _termId, { method: 'DELETE' }).catch(() => {});
     _termId = null;
