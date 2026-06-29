@@ -38797,7 +38797,9 @@ return output
                 except Exception as e:
                     return self._json({"error": str(e)}, 500)
 
-            # POST /api/email/send — send email via Mail.app (new messages only, NOT replies)
+            # POST /api/email/send — send a new email (NOT a reply). Routes to the
+            # Gmail API when `from` is a connected Gmail account (clean send + real
+            # signature); falls back to Mail.app/AppleScript for non-Gmail accounts.
             if method == "POST" and path == "/api/email/send":
                 body = self._read_body()
                 # Reject threading headers — Mail.app blocks custom headers on outgoing
@@ -38893,7 +38895,9 @@ end tell
                 except Exception as e:
                     return self._json({"error": str(e)}, 500)
 
-            # POST /api/email/reply — reply to an existing email in-thread
+            # POST /api/email/reply — reply to an existing email in-thread. Routes
+            # to the Gmail API when from/account is a connected Gmail account (clean
+            # threaded body + signature); Mail.app/AppleScript fallback otherwise.
             if method == "POST" and path == "/api/email/reply":
                 body = self._read_body()
                 message_id = body.get("message_id", "").strip()
