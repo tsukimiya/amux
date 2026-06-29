@@ -38636,13 +38636,24 @@ return output
                 if from_acct:
                     from_safe = from_acct.replace('"', '\\"')
                     from_line = f"""
-        set sender to "{from_safe}"
+        -- Set the sending account. Mail rejects a BARE address as `sender`
+        -- (-10006); it requires the full "Full Name <addr>" identity string.
+        -- Find the account that owns this address (by address or by account
+        -- name), then build the identity from its full name.
         repeat with acct in accounts
-            repeat with addr in email addresses of acct
-                if address of addr is "{from_safe}" then
-                    set sender of new_msg to (address of addr as string)
-                end if
-            end repeat
+            set matchedAcct to false
+            try
+                repeat with addr in email addresses of acct
+                    if address of addr is "{from_safe}" then set matchedAcct to true
+                end repeat
+            end try
+            if (name of acct) is "{from_safe}" then set matchedAcct to true
+            if matchedAcct then
+                set fn to (full name of acct)
+                if fn is missing value then set fn to ""
+                set sender of new_msg to (fn & " <{from_safe}>")
+                exit repeat
+            end if
         end repeat"""
                 script = f"""
 tell application "Mail"
@@ -38653,8 +38664,11 @@ tell application "Mail"
         {cc_line}
     end tell
     {from_line}
-    -- Verify content was actually applied before sending
-    set actualLen to length of (content of new_msg)
+    -- Verify content was actually applied before sending. NOTE: `length of
+    -- (content of new_msg)` inline fails on outgoing messages (-1728/-1700);
+    -- assign content to a variable first, then count its characters.
+    set actualBody to content of new_msg
+    set actualLen to (count of characters of actualBody)
     if actualLen < {expected_len} then
         error "Content verification failed: expected {expected_len} chars, got " & actualLen & " chars. Aborting send."
     end if
@@ -38691,13 +38705,22 @@ end tell
                 if from_acct:
                     from_safe = from_acct.replace('"', '\\"')
                     from_block = f"""
-    -- Set sender on reply
+    -- Set sender on reply. Mail rejects a BARE address as `sender` (-10006);
+    -- it requires the full "Full Name <addr>" identity string.
     repeat with acct in accounts
-        repeat with addr in email addresses of acct
-            if address of addr is "{from_safe}" then
-                set sender of replyMsg to (address of addr as string)
-            end if
-        end repeat
+        set matchedAcct to false
+        try
+            repeat with addr in email addresses of acct
+                if address of addr is "{from_safe}" then set matchedAcct to true
+            end repeat
+        end try
+        if (name of acct) is "{from_safe}" then set matchedAcct to true
+        if matchedAcct then
+            set fn to (full name of acct)
+            if fn is missing value then set fn to ""
+            set sender of replyMsg to (fn & " <{from_safe}>")
+            exit repeat
+        end if
     end repeat"""
                 script = f"""
 tell application "Mail"
