@@ -9357,6 +9357,9 @@ def _email_sync_job() -> None:
 _GMAIL_SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/gmail.send",
+    # settings.basic lets us read the account's configured "send-as" signature
+    # (the same one Gmail web appends) so sends/replies can include it.
+    "https://www.googleapis.com/auth/gmail.settings.basic",
     "https://www.googleapis.com/auth/userinfo.email",
 ]
 _GMAIL_DEFAULT_CLIENT = None  # Must supply ~/.amux/gmail-oauth-client.json
@@ -9596,6 +9599,35 @@ def _gmail_send_message(account: str, to: str, subject: str, body: str,
     except Exception as e:
         slog(f"[gmail] send {account}: {e}")
         return {"error": str(e)}
+
+
+def _gmail_get_signature(account: str, send_as: str = "") -> str:
+    """Return the configured Gmail "send-as" HTML signature for an account.
+
+    Reads users.settings.sendAs — the same signature Gmail web appends — and
+    returns the HTML signature for the matching send-as address (defaults to the
+    primary). Returns "" if none configured / not connected. Needs the
+    gmail.settings.basic scope.
+    """
+    try:
+        svc = _gmail_service(account)
+        if not svc:
+            return ""
+        target = (send_as or account).lower()
+        sendas = svc.users().settings().sendAs().list(userId="me").execute().get("sendAs", [])
+        chosen = None
+        for sa in sendas:
+            if sa.get("sendAsEmail", "").lower() == target:
+                chosen = sa
+                break
+        if chosen is None:
+            chosen = next((sa for sa in sendas if sa.get("isPrimary")), None)
+        if chosen is None and sendas:
+            chosen = sendas[0]
+        return (chosen or {}).get("signature", "") or ""
+    except Exception as e:
+        slog(f"[gmail] get_signature {account}: {e}")
+        return ""
 
 
 def _gmail_list_labels(account: str) -> list:
