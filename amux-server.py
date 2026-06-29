@@ -9636,6 +9636,155 @@ def _gmail_get_signature(account: str, send_as: str = "") -> str:
         return ""
 
 
+def _sig_html_to_text(sig_html: str) -> str:
+    """Best-effort plain-text rendering of an HTML signature (for the text/plain
+    MIME alternative). Keeps line breaks, drops tags/images."""
+    import re as _re, html as _html
+    if not sig_html:
+        return ""
+    t = _re.sub(r"(?i)<\s*br\s*/?>", "\n", sig_html)
+    t = _re.sub(r"(?i)</\s*(p|div|tr|table|h[1-6])\s*>", "\n", t)
+    t = _re.sub(r"<[^>]+>", "", t)
+    t = _html.unescape(t)
+    t = _re.sub(r"[ \t]+\n", "\n", t)
+    t = _re.sub(r"\n{3,}", "\n\n", t)
+    return t.strip()
+
+
+def _gmail_compose_send(account: str, to: str, subject: str, body: str,
+                         cc: str = "", in_reply_to: str = "", references: str = "",
+                         thread_id: str = "", include_signature: bool = True) -> dict:
+    """Send a Gmail message as multipart/alternative (text + HTML) with the
+    account's configured signature appended. Threads via In-Reply-To /
+    References / threadId when provided. Returns {ok,id,thread_id,...} or {error}.
+    """
+    import base64, html as _html
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+    try:
+        svc = _gmail_service(account)
+        if not svc:
+            return {"error": "not_connected"}
+        sig_html = _gmail_get_signature(account) if include_signature else ""
+        body_html = _html.escape(body).replace("\n", "<br>")
+        html_full = f'<div style="white-space:normal;">{body_html}</div>'
+        if sig_html:
+            html_full += f"<br><br>{sig_html}"
+        sig_text = _sig_html_to_text(sig_html)
+        plain_full = body + (("\n\n" + sig_text) if sig_text else "")
+
+        msg = MIMEMultipart("alternative")
+        msg["To"] = to
+        msg["From"] = account
+        msg["Subject"] = subject
+        if cc:
+            msg["Cc"] = cc
+        if in_reply_to:
+            msg["In-Reply-To"] = in_reply_to
+            msg["References"] = references or in_reply_to
+        msg.attach(MIMEText(plain_full, "plain", "utf-8"))
+        msg.attach(MIMEText(html_full, "html", "utf-8"))
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+        send_body: dict = {"raw": raw}
+        if thread_id:
+            send_body["threadId"] = thread_id
+        result = svc.users().messages().send(userId="me", body=send_body).execute()
+        return {"ok": True, "id": result.get("id"), "thread_id": result.get("threadId"),
+                "signature_included": bool(sig_html)}
+    except Exception as e:
+        slog(f"[gmail] compose_send {account}: {e}")
+        return {"error": str(e)}
+
+
+def _gmail_find_message_by_rfc822(account: str, rfc822_id: str) -> dict | None:
+    """Find a Gmail message by its RFC822 Message-ID header. Returns the message
+    resource (metadata headers) or None."""
+    try:
+        svc = _gmail_service(account)
+        if not svc:
+            return None
+        rid = rfc822_id.strip().lstrip("<").rstrip(">")
+        res = svc.users().messages().list(
+            userId="me", q=f"rfc822msgid:{rid}", maxResults=1).execute()
+        msgs = res.get("messages", [])
+        if not msgs:
+            return None
+        return svc.users().messages().get(
+            userId="me", id=msgs[0]["id"], format="metadata",
+            metadataHeaders=["From", "To", "Cc", "Subject", "Message-ID",
+                             "References", "In-Reply-To"]).execute()
+    except Exception as e:
+        slog(f"[gmail] find_rfc822 {account}: {e}")
+        return None
+
+
+def _gmail_reply_send(account: str, rfc822_message_id: str, body: str,
+                       include_signature: bool = True, reply_all: bool = False) -> dict:
+    """Reply in-thread (clean body + signature, correct In-Reply-To/References/
+    threadId) to the message identified by its RFC822 Message-ID header."""
+    orig = _gmail_find_message_by_rfc822(account, rfc822_message_id)
+    if not orig:
+        return {"error": "message not found in this account — check message_id / account"}
+    headers = {h["name"].lower(): h["value"]
+               for h in orig.get("payload", {}).get("headers", [])}
+    thread_id = orig.get("threadId", "")
+    orig_msgid = headers.get("message-id", rfc822_message_id)
+    if not orig_msgid.startswith("<"):
+        orig_msgid = f"<{orig_msgid}>"
+    subject = headers.get("subject", "") or ""
+    if not subject.lower().startswith("re:"):
+        subject = "Re: " + subject
+    to_addr = headers.get("from", "")
+    cc = ""
+    if reply_all:
+        extras = [headers.get("to", ""), headers.get("cc", "")]
+        parts = [p.strip() for chunk in extras for p in chunk.split(",")
+                 if p.strip() and account.lower() not in p.lower()]
+        cc = ", ".join(dict.fromkeys(parts))  # dedup, preserve order
+    references = (headers.get("references", "") + " " + orig_msgid).strip()
+    return _gmail_compose_send(account, to_addr, subject, body, cc=cc,
+                               in_reply_to=orig_msgid, references=references,
+                               thread_id=thread_id, include_signature=include_signature)
+
+
+def _gmail_inbox_messages(account: str, count: int = 20, q: str = "") -> dict:
+    """Return recent messages for the unified /api/email/inbox shape, using the
+    RFC822 Message-ID header as `message_id` so it round-trips into /reply."""
+    try:
+        svc = _gmail_service(account)
+        if not svc:
+            return {"error": "not_connected"}
+        kwargs: dict = {"userId": "me", "maxResults": min(max(count, 1), 100)}
+        if q:
+            kwargs["q"] = q
+        else:
+            kwargs["labelIds"] = ["INBOX"]
+        listed = svc.users().messages().list(**kwargs).execute().get("messages", [])
+        out = []
+        for m in listed:
+            full = svc.users().messages().get(
+                userId="me", id=m["id"], format="metadata",
+                metadataHeaders=["From", "To", "Subject", "Date", "Message-ID"]).execute()
+            h = {hd["name"].lower(): hd["value"]
+                 for hd in full.get("payload", {}).get("headers", [])}
+            out.append({
+                "account": account,
+                "from": h.get("from", ""),
+                "to": h.get("to", ""),
+                "date": h.get("date", ""),
+                "subject": h.get("subject", "(no subject)"),
+                "message_id": h.get("message-id", ""),
+                "thread_id": full.get("threadId", ""),
+                "gmail_id": m["id"],
+                "read": "UNREAD" not in full.get("labelIds", []),
+                "body": full.get("snippet", ""),
+            })
+        return {"messages": out}
+    except Exception as e:
+        slog(f"[gmail] inbox_messages {account}: {e}")
+        return {"error": str(e)}
+
+
 def _gmail_list_labels(account: str) -> list:
     """Return sorted label list for account."""
     try:
@@ -38517,6 +38666,12 @@ class CCHandler(BaseHTTPRequestHandler):
                 lookback_secs = max(lookback_days * 86400, 3600)
                 max_msgs = min(count, 100)
                 lookback_days_frac = lookback_secs / 86400
+                # Prefer Gmail API for a connected account (clean, no AppleScript).
+                if account_filter and account_filter in _gmail_connected_accounts():
+                    res = _gmail_inbox_messages(account_filter, count=count)
+                    if res.get("error"):
+                        return self._json(res, 502)
+                    return self._json(res.get("messages", []))
                 # No-account script: iterate every account's INBOX. The
                 # per-account filter case has its own dedicated script below.
                 # (Earlier this branch interpolated a stray `end if` with no
@@ -38665,6 +38820,19 @@ return output
                     return self._json({"error": f"invalid email address: {to}"}, 400)
                 if cc and not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', cc):
                     return self._json({"error": f"invalid cc address: {cc}"}, 400)
+                # Prefer the Gmail API when sending from a connected Gmail account:
+                # robust delivery, no AppleScript, and the real Gmail signature.
+                # Falls through to Mail.app/AppleScript for non-Gmail accounts.
+                include_sig = body.get("signature", True) is not False
+                if from_acct and from_acct in _gmail_connected_accounts():
+                    res = _gmail_compose_send(from_acct, to, subject, message, cc=cc,
+                                              include_signature=include_sig)
+                    if res.get("error"):
+                        return self._json(res, 502)
+                    return self._json({"ok": True, "to": to, "subject": subject,
+                                       "from": from_acct, "cc": cc or None, "via": "gmail",
+                                       "id": res.get("id"), "thread_id": res.get("thread_id"),
+                                       "signature_included": res.get("signature_included")})
                 cc_line = f'\nset cc of new_msg to "{cc}"' if cc else ""
                 subj_safe = subject.replace('"', '\\"')
                 to_safe = to.replace('"', '\\"')
@@ -38734,6 +38902,22 @@ end tell
                 from_acct = body.get("from", "").strip()
                 if not message_id or not reply_body:
                     return self._json({"error": "message_id and body are required"}, 400)
+                # Prefer Gmail API when replying from a connected Gmail account:
+                # correct In-Reply-To/References/threadId, a clean (non-quoted)
+                # body, and the real Gmail signature. Mail.app fallback otherwise.
+                gmail_from = from_acct or body.get("account", "").strip()
+                include_sig = body.get("signature", True) is not False
+                if gmail_from and gmail_from in _gmail_connected_accounts():
+                    res = _gmail_reply_send(gmail_from, message_id, reply_body,
+                                            include_signature=include_sig,
+                                            reply_all=bool(reply_all))
+                    if res.get("error"):
+                        return self._json(res, 502)
+                    return self._json({"ok": True, "message_id": message_id,
+                                       "reply_all": bool(reply_all), "from": gmail_from,
+                                       "via": "gmail", "id": res.get("id"),
+                                       "thread_id": res.get("thread_id"),
+                                       "signature_included": res.get("signature_included")})
                 msg_id_safe = message_id.replace('"', '\\"')
                 body_expr = _ascript_str(reply_body)
                 expected_len = len(reply_body)
@@ -38850,6 +39034,20 @@ end tell
                 mailbox = (qs.get("mailbox", [""])[0]).strip()
                 if not q:
                     return self._json({"error": "q parameter is required"}, 400)
+                # Prefer Gmail API for a connected account — maps mailbox to a
+                # Gmail query (e.g. Sent -> in:sent) so "read sent" works too.
+                if account and account in _gmail_connected_accounts():
+                    gq, mb = q, mailbox.lower()
+                    if mb in ("sent", "sent mail"):
+                        gq += " in:sent"
+                    elif mb == "inbox":
+                        gq += " in:inbox"
+                    elif mb and mb != "all":
+                        gq += f" label:{mailbox}"
+                    res = _gmail_inbox_messages(account, count=limit, q=gq.strip())
+                    if res.get("error"):
+                        return self._json(res, 502)
+                    return self._json(res.get("messages", []))
                 q_safe = q.replace('"', '\\"')
                 acct_filter = ""
                 if account:
