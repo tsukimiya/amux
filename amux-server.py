@@ -8260,7 +8260,11 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
             # Default to sonnet if no --model specified anywhere
             if "--model" not in cmd:
                 cmd += " --model sonnet"
-            print(f"[start] {name}: cmd={cmd}")
+            # Only log when a custom executable is active — avoids leaking
+            # flags (e.g. --system-prompt, paths) into server logs, matching
+            # the codex/gemini paths which log provider+action only.
+            if _custom_claude:
+                print(f"[start] {name}: AMUX_CLAUDE_CMD={_custom_claude}")
         try:
             tmux_sess = tmux_name(name)
             # Build shell setup string — skip Claude env cleanup for codex

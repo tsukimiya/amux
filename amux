@@ -104,9 +104,10 @@ load_defaults() {
   if [[ -f "$_se" ]]; then
     local _k _v
     while IFS='=' read -r _k _v; do
-      _k="${_k## }"; _k="${_k%% }"
-      _v="${_v## }"; _v="${_v%% }"
-      _v="${_v%$'\r'}"          # tolerate CRLF line endings
+      # Trim all leading/trailing whitespace (matches Python's .strip()).
+      # Standard glob [![:space:]] — no extglob needed.
+      _k="${_k#"${_k%%[![:space:]]*}"}"; _k="${_k%"${_k##*[![:space:]]}"}"
+      _v="${_v#"${_v%%[![:space:]]*}"}"; _v="${_v%"${_v##*[![:space:]]}"}"
       [[ -z "$_k" || "$_k" == \#* || -z "$_v" ]] && continue
       export "$_k=$_v"
     done < "$_se"
@@ -306,7 +307,9 @@ cmd_start() {
     dry_run=true
     shift
   done
-  need_tmux
+  # dry-run is a pure command preview — no tmux session is spawned, so the
+  # tmux dependency only matters for the real start path.
+  $dry_run || need_tmux
   load_defaults
   load_session "$name"
 
